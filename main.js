@@ -32,7 +32,7 @@ const SOURCES = {
 };
 // Static datasets (datasets.js): a finished table, loaded and embedded by static_worker.js, played like a recording (the
 // first half of its rows is the base map, the rest arrives as the stream); nothing arrives after it.
-for (const [key, D] of Object.entries(DATASETS)) SOURCES[key] = { key, what: D.what, noun: D.noun, one: D.one, feed: D.label, h1: `${D.label}: ${params.get('until') && D.time ? `the map up to a date; Play places the rest in date order` : `one map of every ${D.one}; similar ${D.noun} sit together`}`, minWords: 0, filter: `${D.what}; ${D.time ? 'in date order on a time axis by ' + D.time : 'in a fixed random order, with no time axis'}`, fresh: 60, static: true, kind: D.kind, rows: +(params.get('rows') || 0), worker: './static_worker.js' };
+for (const [key, D] of Object.entries(DATASETS)) SOURCES[key] = { key, what: D.what, noun: D.noun, one: D.one, feed: D.label, h1: `${D.label}: ${params.get('until') && D.time ? `the map up to a date; Play places the rest in date order` : `one map of every ${D.one}; similar ${D.noun} sit together`}`, minWords: 0, filter: `${D.what}; ${D.time ? 'in date order on a time axis by ' + D.time : 'in a fixed random order, with no time axis'}`, fresh: 60, static: true, kind: D.kind, caps: D.caps, rows: +(params.get('rows') || 0), worker: './static_worker.js' };
 // A packaged copy (a shared artifact) carries recordings in rec/ and cannot reach the live feeds: the dataset comes from the
 // link's #token (artifacts pass no query string), each source reads its recording through recorded_worker.js.
 const RECORDED = await fetch('./rec/index.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
@@ -59,7 +59,36 @@ state.heat = 'off'; state.rates = null; state.histMinute = -1; state.rateWin = 6
 const events = [];
 function logEvent(kind, detail) { const e = { t: Math.round(performance.now()), played: Math.round(playedNow() / 1000), clock: Math.round(state.clock), kind, ...detail }; events.push(e); if (events.length > 2000) events.shift(); console.info('[jet]', kind, JSON.stringify(e)); }
 // the status note sits on the map's lower right and fades 7 s after the last message, unless it is an error or work in progress (…)
-function status(msg, isError = false) { const el = $('status'); el.textContent = msg; el.classList.toggle('error', isError); el.classList.remove('quiet'); clearTimeout(status.t); if (!isError && !/…\s*$/.test(msg)) status.t = setTimeout(() => el.classList.add('quiet'), 7000); if (isError) document.getElementById('snapOverlay')?.remove(); }
+function status(msg, isError = false) { const el = $('status'); el.textContent = msg; if (LOAD.on) { if (isError) loadDone(true); else { $('lc-detail').textContent = msg; loadTitle(); } } el.classList.toggle('error', isError); el.classList.remove('quiet'); clearTimeout(status.t); if (!isError && !/…\s*$/.test(msg)) status.t = setTimeout(() => el.classList.add('quiet'), 7000); if (isError) document.getElementById('snapOverlay')?.remove(); if (LOAD.on && !isError) el.classList.add('quiet'); }   // while the loading card is up it carries the message
+// ---- the staged loading card: what is being built, which of four steps it is on, and the latest detail from status();
+// the panel (except the data menu) is greyed out and inert until the map is ready. Presentation only.
+const LOAD = { on: true, i: 0 };
+const loadSteps = () => SRC.static ? [`Loading the ${SRC.noun}`, 'Fitting the map on your GPU', 'Finding and naming regions', 'Settling into place']
+  : !FRESH ? ['Loading the recording', 'Scoring the starting map', 'Finding and naming regions', 'Ready']
+  : [SRC.recorded ? 'Loading the recording' : `Fetching and embedding the last ${FRESH} min`, 'Fitting the starting map on your GPU', 'Finding and naming regions', 'Settling into place'];
+function loadTitle() {
+  const n = SRC.static ? (data?.n || SRC.rowsLoaded || 0) : data ? data.nBase : 0;
+  $('lc-title').textContent = (n ? `Laying out ${n.toLocaleString()} ${SRC.what}` : SRC.static ? `Loading ${SRC.what}` : `Building a map of ${SRC.what}`) + ` · step ${LOAD.i + 1} of 4`;
+}
+function loadStep(i) { if (!LOAD.on) return; LOAD.i = i; $('lc-step').textContent = loadSteps()[i]; [...$('lc-bar').children].forEach((b, k) => { b.className = k < i ? 'done' : k === i ? 'now' : ''; }); loadTitle(); }
+function gate(on) { const a = document.querySelector('aside'); a.classList.toggle('loading', on); for (const el of a.querySelectorAll('.gate')) el.inert = on; }
+function loadDone(failed = false) {
+  if (!LOAD.on) return; LOAD.on = false; const c = $('loadcard'); c.classList.add('gone'); setTimeout(() => { c.hidden = true; }, 700);
+  if (!failed) { gate(false); $('play').textContent = playLabel(); introShow(); }
+}
+// ---- the one-time caption: two sentences on what the map is, dismissed for good with Got it (per browser)
+function introShow() {
+  try { if (localStorage.getItem('jet.introSeen') === '1') return; } catch {}
+  const one = SRC.one, noun = SRC.noun;
+  $('intro-text').textContent = `Each dot is one ${one}, and ${noun} about similar things sit close together; the labels name each area by its most distinctive words. ` +
+    (SRC.static ? `Click a dot to read it, or a label to see that area.` : `Press ${$('play').textContent} and new ${noun} land beside their nearest neighbours as they arrive, while the map is quietly re-laid out every so often to keep fitting them.`);
+  $('intro').hidden = false;
+  $('intro-x').onclick = () => { $('intro').hidden = true; try { localStorage.setItem('jet.introSeen', '1'); } catch {} };
+}
+// ---- display casing for label words (a dataset's acronyms: TCAS II, TRACON, IMC...); names are computed lower case
+const CASE = new Map((SRC.caps || []).flatMap((w) => [[w.toLowerCase(), w], [w.toLowerCase().replace(/\s+/g, ''), w]]));
+const dispWord = (w) => CASE.get(w.toLowerCase()) || w.split(/(\s+)/).map((t) => CASE.get(t.toLowerCase()) || t).join('');
+const dispName = (nm) => (CASE.size && nm ? nm.split(' · ').map(dispWord).join(' · ') : nm);
 const median = (arr) => { if (!arr.length) return NaN; const a = Float64Array.from(arr).sort(); const m = a.length >> 1; return a.length % 2 ? a[m] : 0.5 * (a[m - 1] + a[m]); };
 const quantile = (arr, q) => { if (!arr.length) return NaN; const a = Float64Array.from(arr).sort(); return a[Math.min(a.length - 1, Math.floor(q * a.length))]; };
 const fmt = (x, d = 1) => Number.isFinite(x) ? x.toFixed(d) : '—';
@@ -84,7 +113,7 @@ const loadedEnd = () => data.n > data.nBase ? data.tS[data.n - 1] : data.baseSec
 function scoreOf(p) { const W = state.window, b = p * K; let c = 0; for (let k = 0; k < K; k++) if (engine.ranks[b + k] < W) c++; return c / K; }
 function recomputeScores(from = 0) { for (let p = from; p < engine.n; p++) scores[p] = scoreOf(p); renderer.setScores(scores); }
 function threshold() { return state.autoThreshold ? (state.baseQ5 + 0.5) / K : (state.manualKept - 0.5) / K; }
-function applyThreshold() { renderer.threshold = threshold(); $('thrv').textContent = state.autoThreshold ? `stranded at ${state.baseQ5} or fewer of ${K} kept (base map's 5th percentile)` : `stranded below ${state.manualKept} of ${K} kept`; }
+function applyThreshold() { renderer.threshold = threshold(); $('thrv').textContent = state.autoThreshold ? `misplaced: ${state.baseQ5} or fewer of its ${K} nearest by meaning nearby (the starting map's 5th percentile)` : `misplaced: fewer than ${state.manualKept} of its ${K} nearest by meaning nearby`; }
 function updateBaseP5() { const s = []; for (let p = 0; p < data.nBase; p++) s.push(scores[p]); state.baseQ5 = Math.round(quantile(s, 0.05) * K); state.baseMedian = median(s); renderer.fitMid = state.baseMedian; }
 // At-placement stranding, accumulated per 10 s of stream time as rows are placed (so retirement and compaction cannot disturb it)
 function recordPlacement(st) { const thr = threshold(); for (let r = 0; r < st.w; r++) { const p = st.start + r, b = Math.floor(data.tS[p] / 10); const e = state.placeBins.get(b) || [0, 0]; e[1]++; if (scores[p] < thr) e[0]++; state.placeBins.set(b, e); } }
@@ -92,13 +121,14 @@ function strandedCurve(binSec) { const out = new Map(); for (const [b10, e] of s
 
 function updateReadouts(st) {
   $('r-time').textContent = SRC.static ? (SRC.timeAxis ? `up to ${tLabel(state.clock)}` : `${engine.n.toLocaleString()} of ${data.n.toLocaleString()} placed`) : `${mmss(state.clock)} of stream time · latest post ${wall(engine.n > data.nBase ? data.wallS[engine.n - 1] : data.baseSeconds)} local`;
-  $('s-time').innerHTML = noTime() ? '' : `<b>${tLabel(state.clock)}</b>`; $('s-map').innerHTML = `<b>${(engine.n - engine.deadPlaced).toLocaleString()}</b> ${SRC.noun}`;
-  $('s-arr').innerHTML = st ? `<b class="arr">+${st.w.toLocaleString()}</b> placed` : '—'; $('s-ms').innerHTML = st ? `<b>${fmt(st.msTotal, 0)}</b> ms` : '—';
+  // the panel's stats line, every figure with its words: "Stream clock 32:45 · 17,889 posts on map · +10 in the last update"
+  $('s-time').innerHTML = noTime() ? '' : SRC.static ? `Up to <b>${tLabel(state.clock)}</b>` : `Stream clock <b>${tLabel(state.clock)}</b>`; $('s-map').innerHTML = `<b>${(engine.n - engine.deadPlaced).toLocaleString()}</b> ${SRC.noun} on map`;
+  $('s-arr').innerHTML = st ? `<b class="arr">+${st.w.toLocaleString()}</b> in the last update` : '';
   if (!st) return; const thr = threshold(); const kept = [], settle = []; let stranded = 0;
   for (let r = 0; r < st.w; r++) { const p = st.start + r; kept.push(scores[p] * K); settle.push(engine.settleDist[p]); if (scores[p] < thr) stranded++; }
   $('r-mapsize').textContent = st.n.toLocaleString(); $('r-arrivals').textContent = `${st.w.toLocaleString()} posts (${mmss(st.tFirst)} → ${mmss(st.tLast)})`;
-  $('r-fit').textContent = `median ${fmt(median(kept))} of ${K} meaning-neighbours are within the ${state.window} nearest on the map (base map: ${fmt(state.baseMedian * K)})`;
-  $('r-stranded').textContent = `${stranded} of ${st.w} (${fmt(100 * stranded / st.w)} %)`;
+  $('r-fit').textContent = `median ${fmt(median(kept))} of ${K} nearest by meaning are among the ${state.window} nearest on the map (starting map: ${fmt(state.baseMedian * K)})`;
+  $('r-stranded').textContent = `${stranded} of ${st.w} in the last update (${fmt(100 * stranded / st.w)} %)`;
   $('r-settle').textContent = `median ${fmt(median(settle), 3)} map units from barycentre start to final (map is ${fmt(renderer.fitExtent)} across)`;
   $('r-adopters').textContent = `${st.adoptersChanged.toLocaleString()} history rows changed (meaning), ${(st.mapAdopters ?? 0).toLocaleString()} (map)`;
   { const L = st.ledger || engine.ledger, placed = Math.max(1, engine.placedTotal); $('r-ledger').textContent = `${L.net.toLocaleString()} entries now (${(L.net / Math.max(1, engine.n - engine.deadPlaced)).toFixed(2)} per row; base map ${(L.base ?? 0).toLocaleString()}) · +${L.created} −${L.removed} this flush · ${L.gross.toLocaleString()} created since the base (${(L.gross / placed).toFixed(1)} per arrival)`; }
@@ -142,11 +172,11 @@ function drawTimeline() {
   for (let b = 0; b < nb; b++) { const h = (H - top - bot) * counts[b] / maxC, tb = b * binSec; ctx.fillStyle = tb < data.baseSeconds ? '#4a5a74' : (tb <= state.clock ? '#7d8da6' : '#2a3340'); ctx.fillRect(b * bw, H - bot - h, Math.max(1, bw - 0.5), h); }
   let strandedNote = ''; const curve = strandedCurve(binSec); if (curve.size) { ctx.strokeStyle = '#f0734a'; ctx.lineWidth = 1.5; ctx.beginPath(); let first = true; const maxF = Math.max(0.05, ...curve.values());
     for (const [b, f] of [...curve.entries()].sort((a, bb) => a[0] - bb[0])) { const x = b * bw + bw / 2, y = H - bot - (H - top - bot) * f / maxF; if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y); } ctx.stroke();
-    strandedNote = ' · orange: stranded'; }
+    strandedNote = ' · orange: misplaced'; }
   // the stretch the rewind can show: from the oldest kept snapshot to the play-head
   if (snaps.length || live) { const lo = snaps.length ? snaps[0].clock : live.clock; ctx.fillStyle = 'rgba(255,186,70,0.35)'; ctx.fillRect(xOf(lo), top - 3, Math.max(1, xOf(state.clock) - xOf(lo)), 2); }
   drawCursors(ctx, ts, top, H, bot);
-  ctx.textAlign = 'left'; ctx.fillStyle = '#9fb0c6'; ctx.fillText(`${SRC.noun} per ${SRC.timeAxis ? ((SRC.timeAxis.d1 - SRC.timeAxis.d0) / YEAR_MS > 6 ? 'year' : 'month') : binSec >= 60 ? binSec / 60 + ' min' : binSec + ' s'}${strandedNote}${state.rebuildMarks.length ? ' · green: rebuilds' : ''}`, 6, 12);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#9fb0c6'; ctx.fillText(`${SRC.noun} per ${SRC.timeAxis ? ((SRC.timeAxis.d1 - SRC.timeAxis.d0) / YEAR_MS > 6 ? 'year' : 'month') : binSec >= 60 ? binSec / 60 + ' min' : binSec + ' s'}${strandedNote}${state.rebuildMarks.length ? ' · green: re-layouts' : ''}`, 6, 12);
 }
 // ---- lineage view: one band per region identity over stream time, height = living posts (from the biography), colour = the
 // region's tint; a new identity is stacked next to the region most of its base rows came from, so a split forks out of its
@@ -190,7 +220,7 @@ function drawLineage() {
   if (key !== lineage.key) { const t0 = performance.now(); Object.assign(lineage, lineageBitmap(W, H, fUid), { key, W, H }); lineage.ms = performance.now() - t0; }
   ctx.drawImage(lineage.bmp, 0, 0, W, H);
   const ts = lineageScale(W); drawCursors(ctx, ts, lineage.top, H, lineage.bot);
-  ctx.textAlign = 'left'; ctx.fillStyle = '#9fb0c6'; ctx.font = '11px system-ui, sans-serif'; ctx.fillText(`${lineage.nS} regions over time${state.rebuildMarks.length ? ' · green: rebuilds' : ''}`, 6, 12);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#9fb0c6'; ctx.font = '11px system-ui, sans-serif'; ctx.fillText(`${lineage.nS} regions over time${state.rebuildMarks.length ? ' · green: re-layouts' : ''}`, 6, 12);
 }
 function lineageHit(x, y, tol = 0) {   // the band under (x, y); with a tolerance, the nearest band edge within tol px when none is exactly under
   const L = lineage; if (!L.cols || x < 0 || x >= L.W) return null; const xi = Math.floor(x); let best = null, bd = tol + 1e-9;
@@ -208,7 +238,7 @@ function showLoupe(el, ev) {
   const sx = Math.max(0, Math.min(lineage.W - LOUPE.w, x - LOUPE.w / 2)), sy = Math.max(0, Math.min(lineage.H - LOUPE.h, y - LOUPE.h / 2));
   ctx.imageSmoothingEnabled = false; ctx.drawImage(lineage.bmp, sx * dpr, sy * dpr, LOUPE.w * dpr, LOUPE.h * dpr, 0, 0, W, LOUPE.h * LOUPE.mag);
   const cx = (x - sx) * LOUPE.mag, cy = (y - sy) * LOUPE.mag; ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(cx - 8, cy); ctx.lineTo(cx + 8, cy); ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8); ctx.stroke();
-  const hit = lineageHit(x, y, 4); ctx.fillStyle = '#e6edf6'; ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.fillText(hit ? hit.name : '', 6, H - 4);
+  const hit = lineageHit(x, y, 4); ctx.fillStyle = '#e6edf6'; ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.fillText(hit ? dispName(hit.name) : '', 6, H - 4);
   const stage = $('map').parentElement.getBoundingClientRect(); lp.style.left = Math.max(4, Math.min(stage.width - W - 4, ev.clientX - stage.left - W / 2)) + 'px'; lp.hidden = false;
 }
 
@@ -242,7 +272,7 @@ async function flushPendingInner() {
   while (w > 0) { const c = Math.min(w, FLUSH_CAP); const since = state.clock - renderer.recentWindow; renderer.updateAppear(engine.n, c, (r) => !state.catchingUp && !state.quietPlace && data.tS[r] >= since); const tw = performance.now(), gap = state.lastFlushWall ? tw - state.lastFlushWall : 0; const st = await engine.flush(c); const wallMs = performance.now() - tw; state.lastFlushWall = performance.now(); if (st && (wallMs > 250 || gap > 1500)) logEvent('slow flush', { rows: c, wallMs: Math.round(wallMs), gpuMs: Math.round(st.msTotal), gapMs: Math.round(gap), rebuilding: state.rebuilding }); if (st) { snapTail(st.start, st.w); state.cumulativeMs += st.msTotal; state.lastStats = st; state.ledgerLog.push([st.tLast, engine.placedTotal, st.ledger.gross, st.ledger.net]); recomputeScores(st.start); recordPlacement(st); assignRegions(st.start, st.w); state.log.push(st); any = true; } w -= c; }
   if (any) { await retireSuperseded(); await enforceBudget(); autoLook(); regionRates(); const minute = Math.floor(state.clock / 60); if (minute !== state.histMinute) { state.histMinute = minute; recordHistory('minute'); } if (rstate.focus >= 0) showRegion(); }
   const due = !state.catchingUp && (state.rebuildRequested || (state.autoRebuild && playedNow() - state.lastRebuildPlayed >= state.rebuildMinutes * 60000) || (state.rebuildArrivals > 0 && engine.placedTotal - engine.placedAtRebuild >= state.rebuildArrivals));
-  if (due && !state.rebuilding && !state.tuneMode && !cast?.on && engine.n > data.nBase) doRebuild(state.rebuildRequested ? 'requested' : 'cadence').catch(e => status('Rebuild failed: ' + (e.message || e), true));   // not awaited: arrivals keep flowing
+  if (due && !state.rebuilding && !state.tuneMode && !cast?.on && engine.n > data.nBase) doRebuild(state.rebuildRequested ? 'requested' : 'cadence').catch(e => status('Re-layout failed: ' + (e.message || e), true));   // not awaited: arrivals keep flowing
   return any;
 }
 // Quiet rebuild (NodeGardener v3) and its morph: history leashed, arrivals free; then every dot glides from its old
@@ -250,7 +280,7 @@ async function flushPendingInner() {
 async function doRebuild(reason = 'requested') {
   if (state.rebuilding) return null; if (view.on) viewExit(); state.rebuilding = true; state.rebuildRequested = false; state.lastRebuildPlayed = playedNow(); const tStart = performance.now(); logEvent('rebuild start', { reason, rows: engine.n, k: state.rebuildMarks.length + 1 });
   try {
-    status(`Rebuilding ${(engine.n - engine.deadPlaced).toLocaleString()} rows…`);
+    status(`Re-laying out ${(engine.n - engine.deadPlaced).toLocaleString()} ${SRC.noun}…`);
     const meanKept = () => { let sum = 0, c = 0; for (let p = 0; p < engine.n; p++) if (engine.alive[p]) { sum += scoreOf(p); c++; } return c ? sum / c * K : 0; };
     await engine.computeRanks(0, engine.n, engine.n, engine.knnIdx.subarray(0, engine.n * K)); const keptBefore = meanKept();
     // Hold every row at its current position for the whole rebuild: the morph mode reads positions from `start`, so the engine's
@@ -265,7 +295,7 @@ async function doRebuild(reason = 'requested') {
     await glide(Math.max(0, state.morphMs));
     const mark = { clock: state.clock, reason, keptBefore, keptAfter, ...st }; state.rebuildMarks.push(mark); state.lastRebuildClock = state.clock; logEvent('rebuild morph done', { k: state.rebuildMarks.length, wallMs: Math.round(performance.now() - tStart) });
     updateReadouts(state.lastStats); render(); drawTimeline(); legend();
-    status(`Rebuilt in ${(st.msTotal / 1000).toFixed(1)} s · local fit ${keptBefore.toFixed(1)} → ${keptAfter.toFixed(1)} of 15`);
+    status(`Re-laid out in ${(st.msTotal / 1000).toFixed(1)} s · ${keptBefore.toFixed(1)} → ${keptAfter.toFixed(1)} of 15 nearest by meaning nearby`);
     return mark;
   } catch (e) { logEvent('rebuild failed', { message: String(e && e.message || e), stack: String(e && e.stack || '').slice(0, 400) }); console.error('[jet] rebuild failed', e); throw e; }
   finally { state.rebuilding = false; state.morphing = false; renderer.settle = 1; renderer.rmix = 1; }
@@ -278,7 +308,7 @@ async function glide(T, each = null) {
   if (each) each(1);
   renderer.settle = 1; renderer.rmix = 1; state.morphing = false; if (regionPrevS) { regionPrevS.set(regionS); renderer.updateRegionIds(regionS, 0, engine.n, regionPrevS); } drawFrame(); scheduleChips();
 }
-async function requestRebuild() { if (view.on) viewExit(); if (state.flushBusy || state.playing) { state.rebuildRequested = true; status('Rebuild queued'); if (!state.playing) { await flushPending(); } } else await doRebuild('requested'); }
+async function requestRebuild() { if (view.on) viewExit(); if (state.flushBusy || state.playing) { state.rebuildRequested = true; status('Re-layout queued'); if (!state.playing) { await flushPending(); } } else await doRebuild('requested'); }
 // Capped history: when living arrivals exceed the budget, retire the excess from among the oldest living arrivals
 // (a pool of four times the excess, older than the emphasis window), densest first by 15th-neighbour radius in feature
 // space, so dense cores thin out before sparse rows. Retired rows leave the search, their neighbours' lists are
@@ -502,7 +532,7 @@ const RATE_WIN = 60, SPARK_WIN = 600, SPARK_BIN = 10;
 // a sparse map is not blurred into one cloud. The rate is arrivals per stream second over the last ten
 // minutes placed, or the base map's own rate before that; a value changes only when it moves by more than 20 %.
 const look = { auto: { recent: true, sigma: true, soft: true, tau: true, heatWin: true }, grainPick: null };
-const TINT_MAX_PX = 5, CHIP_CAP = 50;
+const TINT_MAX_PX = 5, CHIP_CAP = 50, CHIP_SHOW = 8;   // CHIP_SHOW: labels on screen at the opening zoom (layoutChips)
 const tintPx = () => Math.min(rstate.sigma, TINT_MAX_PX);
 function arrivalRate() {
   const span = Math.min(600, Math.max(1, state.clock - data.baseSeconds)); let c = 0;
@@ -566,7 +596,7 @@ function recordHistory(kind) {
 function showRegion() {
   const el = $('region'), k = rstate.focus; if (k < 0 || !regions || k >= regions.regions.length) { el.hidden = true; return; }
   const r = regions.regions[k], rates = state.rates || regionRates(), since = state.live ? 'going live' : 'Play'; el.hidden = false;
-  $('region-title').textContent = r.name;
+  $('region-title').textContent = dispName(r.name);
   $('region-count').textContent = `${r.count.toLocaleString()} living: ${r.countBase.toLocaleString()} from the base map, ${(r.count - r.countBase).toLocaleString()} arrivals` + (r.arr ? ` · +${r.arr.toLocaleString()} since ${since}` : '');
   const c = rates ? rates.cnt[k] : 0, ratio = rates ? rates.ratio[k] : 0;
   $('region-rate').textContent = rates && rates.total ? `${c} in the last ${mmss(state.rateWin || RATE_WIN)} · ${(100 * c / rates.total).toFixed(1)} % of arrivals vs ${(100 * r.countBase / data.nBase).toFixed(1)} % of the base map` + (ratio ? ` (${ratio.toFixed(1)}×)` : '') : 'no arrivals in the last minute';
@@ -578,11 +608,11 @@ function showRegion() {
   // biography
   const e = regionHist.get(r.uid), lines = [];
   if (e) {
-    if (e.born) lines.push(`appeared at ${mmss(e.born.clock)}` + (e.born.from.length ? ` from ${e.born.from.map(f => `‘${f.name}’ (${Math.round(100 * f.share)} %)`).join(', ')}` : ' (new area)'));
+    if (e.born) lines.push(`appeared at ${mmss(e.born.clock)}` + (e.born.from.length ? ` from ${e.born.from.map(f => `‘${dispName(f.name)}’ (${Math.round(100 * f.share)} %)`).join(', ')}` : ' (new area)'));
     else lines.push('on the map since the base fit');
     const first = e.log[0]; if (first && e.log.length > 1) lines.push(`${first.count.toLocaleString()} posts at ${mmss(first.clock)} → ${r.count.toLocaleString()} now`);
-    const renames = e.log.filter(x => x.renamed); for (const x of renames.slice(-3)) { const i = e.log.indexOf(x); lines.push(`called ‘${e.log[i - 1].name}’ until ${mmss(x.clock)}`); }
-    const rebuilds = e.log.filter(x => x.kind === 'rebuild').length; if (rebuilds) lines.push(`${rebuilds} rebuild${rebuilds > 1 ? 's' : ''} kept its identity`);
+    const renames = e.log.filter(x => x.renamed); for (const x of renames.slice(-3)) { const i = e.log.indexOf(x); lines.push(`called ‘${dispName(e.log[i - 1].name)}’ until ${mmss(x.clock)}`); }
+    const rebuilds = e.log.filter(x => x.kind === 'rebuild').length; if (rebuilds) lines.push(`kept its identity through ${rebuilds} re-layout${rebuilds > 1 ? 's' : ''}`);
   }
   $('region-hist').innerHTML = lines.map(esc).join('<br>');
   $('region-rep').innerHTML = r.rep >= 0 && data.posts[r.rep] ? esc(data.posts[r.rep].text) + '<small>the base post nearest the region’s mean vector</small>' : '';
@@ -619,7 +649,7 @@ async function animateWords(d, words) {
   } finally { d._anim = false; d._next = null; }
 }
 function focusUid() { return rstate.focus >= 0 && regions && regions.regions[rstate.focus] ? regions.regions[rstate.focus].uid : -1; }
-function focusByUid(uid) { const k = regions ? regions.regions.findIndex(r => r.uid === uid) : -1; if (k >= 0) setFocus(k); else { const e = regionHist.get(uid), last = e && e.log[e.log.length - 1]; if (e && e.ended) status(`‘${last.name}’ ended ${mmss(e.ended.clock)}` + (e.ended.into.length ? ` → ‘${e.ended.into[0].name}’` : '')); } }
+function focusByUid(uid) { const k = regions ? regions.regions.findIndex(r => r.uid === uid) : -1; if (k >= 0) setFocus(k); else { const e = regionHist.get(uid), last = e && e.log[e.log.length - 1]; if (e && e.ended) status(`‘${dispName(last.name)}’ ended ${mmss(e.ended.clock)}` + (e.ended.into.length ? ` → ‘${dispName(e.ended.into[0].name)}’` : '')); } }
 function layoutChips() {
   const el = $('chips'), R = view.on ? view.chips : (regions ? regions.regions : null);
   if (!R || !rstate.chips) { if (chipEls.size) { el.replaceChildren(); chipEls.clear(); } return; }
@@ -629,14 +659,20 @@ function layoutChips() {
   const shown = (r) => { const d = chipEls.get(r.uid); return d && !d.classList.contains('bye') ? 1 : 0; };
   // order: the focused chip, then chips already on screen (a crowded spot must not flip between two chips), then the larger region
   const order = [...R].sort((a, b) => (b.uid === fUid) - (a.uid === fUid) || shown(b) - shown(a) || b.count - a.count || a.uid - b.uid);
+  // how many: CHIP_SHOW of the largest regions in view at the opening zoom, more in proportion as the map is zoomed in; a chip
+  // already on screen keeps its place until it drops a quarter below the cut, so a region growing past another never flickers
+  const zoom = Math.max(1, v.scale / (0.9 * Math.min(c.width, c.height) / Math.max(1e-9, renderer.fitExtent || 1))), cap = Math.round(CHIP_SHOW * zoom), allow = new Set();
+  R.filter((r) => { const x = sx(r.cx), y = sy(r.cy); return x >= -40 && x <= W + 40 && y >= -40 && y <= H + 40; }).sort((a, b) => b.count - a.count || a.uid - b.uid)
+    .forEach((r, i) => { if (i < cap || r.uid === fUid || (shown(r) && i < Math.ceil(cap * 1.25))) allow.add(r.uid); });
   for (const r of order) {
+    if (!allow.has(r.uid)) continue;
     const ax = r.prev && mix < 1 ? r.prev.cx + (r.cx - r.prev.cx) * mix : r.cx, ay = r.prev && mix < 1 ? r.prev.cy + (r.cy - r.prev.cy) * mix : r.cy;
     const fxs = sx(r.cx), fys = sy(r.cy); if (fxs < -40 || fxs > W + 40 || fys < -40 || fys > H + 40) continue;   // visibility and declutter use the final position
     const cxs = sx(ax), cys = sy(ay);
     // anchor the chip just above the visible spread of the region's points (1.5 standard deviations of their vertical spread, 12 to 60 px)
     const lift = Math.min(60, Math.max(12, 1.5 * r.sdy * v.scale / dpr)) + 8, cx = cxs, cy = cys - lift, fx = fxs, fy = fys - lift;
     const w = 7 * r.name.length + 70, h = 22; if (placed.some(q => Math.abs(q.x - fx) < (q.w + w) / 2 && Math.abs(q.y - fy) < h)) continue; placed.push({ x: fx, y: fy, w });
-    let d = chipEls.get(r.uid), words = r.name.split(' · ');
+    let d = chipEls.get(r.uid), words = dispName(r.name).split(' · ');
     if (!d) {   // a new identity: the chip appears at its own place (never travels from somewhere else)
       d = document.createElement('div'); d.className = 'chip'; d.innerHTML = '<i></i><span class="words"></span><small></small>'; d._words = words; d.querySelector('.words').replaceChildren(...words.map(wordSpan));
       d.addEventListener('click', (ev) => { ev.stopPropagation(); focusByUid(d._uid); }); chipEls.set(r.uid, d); el.appendChild(d);
@@ -692,9 +728,9 @@ function viewCounts() {   // living posts per region at the viewed time, counted
   for (let p = data.nBase; p < n; p++) { const r = reg[p]; if (r >= 0 && r < C.length) { cnt[r]++; if (data.tS[p] > cf) arr[r]++; } }
   for (const r of C) { r.count = r.countBase + cnt[r.k]; r.arr = arr[r.k]; }
 }
-function viewHint() { const reb = state.rebuildMarks.length; $('r-view').textContent = view.on ? `${view.auto ? 'replay · ' : ''}${tLabel(view.T)} · ${view.shown ? (view.shown.k ? `after rebuild ${view.shown.k} of ${reb}` : 'base layout') : 'current layout'}` : 'off'; }
+function viewHint() { const reb = state.rebuildMarks.length; $('r-view').textContent = view.on ? `${view.auto ? 'replay · ' : ''}${tLabel(view.T)} · ${view.shown ? (view.shown.k ? `after re-layout ${view.shown.k} of ${reb}` : 'starting map') : 'current layout'}` : 'off'; $('r-viewRow').hidden = !view.on; }
 function viewTo(T, glideMs = REWIND_GLIDE_MS) {
-  if (state.rebuilding) { status('Rewind waits for the rebuild in progress.'); return; }
+  if (state.rebuilding) { status('Rewind waits for the re-layout in progress.'); return; }
   const head = state.clock; T = Math.max(viewLo(), Math.min(head, T)); const tgt = epochAt(T), now = performance.now();
   if (!view.on) {
     if (state.playing) setPlaying(false); if (state.inspect !== null) clearInspect();
@@ -747,7 +783,7 @@ async function prepareEpochs(segs = 6) {
     for (let i = 1; i <= segs; i++) {
       const T = data.baseSeconds + (end - data.baseSeconds) * i / segs;
       status(`Preparing the replay: placing to ${mmss(T)} (segment ${i} of ${segs})…`); await runTo(T);
-      status(`Preparing the replay: rebuild ${i} of ${segs}…`); await doRebuild('replay');
+      status(`Preparing the replay: re-layout ${i} of ${segs}…`); await doRebuild('replay');
     }
   } finally { state.morphMs = savedMorph; state.autoRebuild = savedAuto; state.catchingUp = false; updateLiveBadge(); }
   logEvent('timelapse prepared', { segments: segs, snapshots: snaps.length }); return true;
@@ -778,16 +814,16 @@ function legend() {   // one short line per entry: a swatch and a few words; the
   const el = $('legend'); el.innerHTML = ''; const mode = renderer.mode; const add = (html) => { const d = document.createElement('div'); d.innerHTML = html; el.appendChild(d); };
   const ramp = (stops, w = 90) => `<i style="background:linear-gradient(90deg,${stops.join(',')});width:${w}px"></i>`, nm = (t) => t.length > 34 ? t.slice(0, 33) + '…' : t;
   if (mode === 0) { const counts = new Map(); for (let p = 0; p < engine.n; p++) counts.set(data.labelS[p], (counts.get(data.labelS[p]) || 0) + 1);
-    [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).forEach(([l, c]) => add(`<i style="background:${data.labelColors[data.labels[l]]}"></i>${nm(data.labels[l])} <small>${c.toLocaleString()}</small>`)); add(`<small>${data.labels.length} topics</small>`); }
+    [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).forEach(([l, c]) => add(`<i style="background:${data.labelColors[data.labels[l]]}"></i>${nm(dispName(data.labels[l]))} <small>${c.toLocaleString()}</small>`)); add(`<small>${data.labels.length} topics</small>`); }
   else if (mode === 1) add(`${ramp(['#fadc40', '#229e9e', '#383380'])}new → ${mmss(Math.max(1, loadedEnd() - data.baseSeconds))} old`);
-  else if (mode === 2) { add('<i style="background:#8c99ad"></i>base map'); add('<i style="background:#ffb34d"></i>streamed'); }
-  else if (mode === 3) add(`${ramp(['#d95930', '#9ea3ad', '#1c9e75'])}local fit: poor → full`);
+  else if (mode === 2) { add('<i style="background:#8c99ad"></i>starting map'); add('<i style="background:#ffb34d"></i>new arrival'); }
+  else if (mode === 3) add(`${ramp(['#d95930', '#9ea3ad', '#1c9e75'])}placed badly → well`);
   else if (mode === 5) { add('<i style="background:#f2bf4d"></i>reply'); add('<i style="background:#59a6f2"></i>original'); }
-  else if (mode === 6) { if (regions) { [...regions.regions].sort((a, b) => b.count - a.count).slice(0, 12).forEach(r => add(`<i style="background:${r.color}"></i>${nm(r.name)} <small>${r.count.toLocaleString()}</small>`)); add(`<small>${regions.regions.length} regions</small>`); } else add('<small>regions off</small>'); }
-  else { add('<i style="background:#ffd966"></i>latest flush'); add('<i style="background:#666c78"></i>earlier'); }
-  if (renderer.showStranded) add('<i style="border:1.5px solid #f5733f;border-radius:50%;background:none"></i>stranded');
+  else if (mode === 6) { if (regions) { [...regions.regions].sort((a, b) => b.count - a.count).slice(0, 12).forEach(r => add(`<i style="background:${r.color}"></i>${nm(dispName(r.name))} <small>${r.count.toLocaleString()}</small>`)); add(`<small>${regions.regions.length} regions</small>`); } else add('<small>regions off</small>'); }
+  else { add('<i style="background:#ffd966"></i>latest update'); add('<i style="background:#666c78"></i>earlier'); }
+  if (renderer.showStranded) add('<i style="border:1.5px solid #f5733f;border-radius:50%;background:none"></i>misplaced');
   if (renderer.growth) add(`<i style="background:#f8c060"></i>arrivals, last ${renderer.growthWindow} s`);
-  if (state.heat !== 'off') add(`${ramp([0, 0.25, 0.5, 0.75, 1].map(heatCss))}${state.heat === 'growth' ? 'growth' : 'volume'}, cold → hot`);
+  if (state.heat !== 'off') add(`${ramp([0, 0.25, 0.5, 0.75, 1].map(heatCss))}${state.heat === 'growth' ? 'growing' : 'busy'}: least → most`);
 }
 
 function inspectAt(clientX, clientY) {
@@ -807,12 +843,12 @@ function showInspect() {
   if (state.inspectMode !== 'adopters') for (const j of I.neighbours) { ids.push(j); kinds.push(adSet.has(j) && state.inspectMode === 'both' ? 3 : 1); }
   if (state.inspectMode !== 'neighbours') for (const i of I.adopters) { if (state.inspectMode === 'both' && nbSet.has(i)) continue; ids.push(i); kinds.push(2); }
   renderer.setHighlight(ids, kinds);
-  const mutual = I.neighbours.filter(j => adSet.has(j)).length, post = data.posts[p], lab = data.labels[data.labelS[p]] || 'unlabelled';
+  const mutual = I.neighbours.filter(j => adSet.has(j)).length, post = data.posts[p], lab = data.labels[data.labelS[p]] || 'unlabelled';   // lab keys the colour table; shown through dispName
   $('inspect').hidden = false;
-  $('inspectTitle').textContent = `Inspected ${SRC.one}`; $('inspect-title').textContent = `${SRC.one[0].toUpperCase() + SRC.one.slice(1)} ${p.toLocaleString()}${SRC.static ? (SRC.timeAxis ? ` · ${tLabel(data.tS[p])}` : '') : ` · ${mmss(data.tS[p])} of stream time (${wall(data.wallS[p])} local)`} · ${p < data.nBase ? 'base map' : 'streamed'}${post.reply ? ' · reply' : ''}`;
+  $('inspectTitle').textContent = `Inspected ${SRC.one}`; $('inspect-title').textContent = `${SRC.one[0].toUpperCase() + SRC.one.slice(1)} ${p.toLocaleString()}${SRC.static ? (SRC.timeAxis ? ` · ${tLabel(data.tS[p])}` : '') : ` · ${mmss(data.tS[p])} of stream time (${wall(data.wallS[p])} local)`} · ${p < data.nBase ? 'starting map' : 'new arrival'}${post.reply ? ' · reply' : ''}`;
   const reg = regions && regionS[p] >= 0 ? regions.regions[regionS[p]] : null;
-  $('inspect-post').innerHTML = (post.img ? `<img class="thumb" src="${post.img}" alt="">` : '') + esc(post.text) + `<small><i class="sw" style="background:${data.labelColors[lab] || '#666'}"></i>${esc(lab)}${reg ? ` · region: ${esc(reg.name)}` : (regions ? ' · outside every region' : '')}${post.tags.length ? ' · #' + post.tags.map(esc).join(' #') : ''}${post.score != null ? ` · score ${post.score}${post.descendants != null ? `, ${post.descendants} comments` : ''}` : ''}${post.kind ? ` · ${esc(String(post.kind))}` : ''}</small>`;
-  $('inspect-body').innerHTML = `<div><i class="sw" style="background:#59e6c7"></i>${K} nearest by meaning (its current list)</div><div><i class="sw" style="background:#fa80c8"></i>${I.adopters.length} posts keep it in their own ${K}-nearest list (adopters)</div><div><i class="sw" style="background:#ffd959"></i>${mutual} are both</div><small>lists are as of ${mmss(state.clock)}; neighbours placed later than this post can appear</small>`;
+  $('inspect-post').innerHTML = (post.img ? `<img class="thumb" src="${post.img}" alt="">` : '') + esc(post.text) + `<small><i class="sw" style="background:${data.labelColors[lab] || '#666'}"></i>${esc(dispName(lab))}${reg ? ` · region: ${esc(dispName(reg.name))}` : (regions ? ' · outside every region' : '')}${post.tags.length ? ' · #' + post.tags.map(esc).join(' #') : ''}${post.score != null ? ` · score ${post.score}${post.descendants != null ? `, ${post.descendants} comments` : ''}` : ''}${post.kind ? ` · ${esc(String(post.kind))}` : ''}</small>`;
+  $('inspect-body').innerHTML = `<div><i class="sw" style="background:#59e6c7"></i>${K} nearest by meaning (its current list)</div><div><i class="sw" style="background:#fa80c8"></i>${I.adopters.length} ${SRC.noun} list it among their own ${K} nearest (adopters)</div><div><i class="sw" style="background:#ffd959"></i>${mutual} are both</div><small>lists are as of ${mmss(state.clock)}; neighbours placed later than this post can appear</small>`;
   $('inspect-nbrs').innerHTML = I.neighbours.slice(0, 5).map((j, k) => { const q = data.posts[j]; const t = q.text.length > 220 ? q.text.slice(0, 217) + '…' : q.text; return `<div class="nbr"><b>${k + 1}.</b> ${esc(t)}</div>`; }).join('');
 }
 
@@ -825,7 +861,7 @@ function updateLiveBadge() {
 }
 const playedNow = () => state.playedMs + (state.playing ? performance.now() - state.playWall : 0);
 function nextRebuildText() {
-  if (state.rebuilding) return 'rebuilding…';
+  if (state.rebuilding) return 're-laying out…';
   if (!state.autoRebuild && !state.rebuildArrivals) return '';
   const parts = [];
   if (state.autoRebuild) parts.push(mmss(Math.max(0, state.rebuildMinutes * 60 - (playedNow() - state.lastRebuildPlayed) / 1000)) + (state.playing ? '' : ' (paused)'));
@@ -833,7 +869,14 @@ function nextRebuildText() {
   return 'next in ' + parts.join(' or ');
 }
 setInterval(() => { if (engine) $('r-next').textContent = nextRebuildText(); }, 1000);
-function setPlaying(on) { if (on && view.on) viewExit(); if (on && !state.playing) state.playWall = performance.now(); else if (!on && state.playing) state.playedMs += performance.now() - state.playWall; state.playing = on; $('play').textContent = on ? 'Pause' : 'Play'; updateLiveBadge(); if (on && state.live) status(state.worker ? LIVE_MSG('WebGPU') : 'Live from the relay'); if (on) playLoop(); }
+// the one primary action's words: "Play the hour" from the start of a recording or live window, then Pause and Resume
+function playLabel() {
+  if (state.playing) return 'Pause'; if (state.live) return 'Resume live'; if (SRC.static) return engine && engine.n > data.nBase ? 'Resume' : 'Play the rest';
+  if (data && state.clock > data.baseSeconds + 0.01) return 'Resume';
+  const min = Math.round(FRESH || (data ? loadedEnd() / 60 : 60)) || 60;   // the whole window: the starting map's part and the part that plays
+  return min === 60 ? 'Play the hour' : min % 60 === 0 ? `Play the ${min / 60} hours` : `Play the ${min} minutes`;
+}
+function setPlaying(on) { if (on && view.on) viewExit(); if (on && !state.playing) state.playWall = performance.now(); else if (!on && state.playing) state.playedMs += performance.now() - state.playWall; state.playing = on; $('play').textContent = playLabel(); updateLiveBadge(); if (on && state.live) status(state.worker ? LIVE_MSG('WebGPU') : 'Live from the relay'); if (on) playLoop(); }
 // One live frame (from the relay socket or the in-browser worker): vectors + posts, placed behind the loaded rows.
 function ingestFrame(hdr, vecs, refuse) {
   if (hdr.model && data.model && hdr.model !== data.model) { refuse(`Live feed refused: it embeds with ${hdr.model} but this base was built from ${data.model}. Pick a ${hdr.encoder || hdr.model} base or restart the relay with --encoder ${data.encoder}.`); return; }
@@ -864,7 +907,7 @@ async function liveOn(msg) {
     while (state.playing && state.clock < loadedEnd()) await new Promise(r => setTimeout(r, 100));
     if (state.playing) setPlaying(false);
     state.speed = saved.speed; state.interval = saved.interval; state.catchingUp = false; logEvent('catch-up done', { placed: engine.n });
-    status('Going live: one rebuild…'); try { await doRebuild('go live'); } catch (e) { /* logged; the stream still starts */ }
+    status('Going live: one re-layout…'); try { await doRebuild('go live'); } catch (e) { /* logged; the stream still starts */ }
   }
   state.live = true; setClock(loadedEnd()); status(msg); if (!state.playing) setPlaying(true); else updateLiveBadge();
 }
@@ -963,6 +1006,7 @@ function staticUi() {
   if (!UNTIL) for (const id of ['rebuildNow', 'r-next', 'lineage-btn']) { const el = $(id); if (el) el.hidden = true; }   // nothing streams: no re-layouts, no lineage
   $('replay30').hidden = noTime() || !UNTIL; $('speed').closest('.ctl')?.setAttribute('hidden', '');
   $('replay30').textContent = 'Replay in 30 s'; $('lineage-btn').hidden = noTime() || !UNTIL;
+  if (!UNTIL) { $('m-play').hidden = $('m-relayout').hidden = true; $('m-hint').textContent = `The whole table is laid out in one go on your GPU: one UMAP fit of every ${SRC.one}, so similar ${SRC.noun} sit together.` + (SRC.timeAxis ? ` Drag back along the timeline to fit the map at an earlier date; Play then places the rest, one by one, beside their nearest neighbours by meaning (Batched RevAdopt).` : ''); }
   if (data.catIndex) {   // coloured by the dataset's own label, named as the dataset names it
     const o = [...$('mode').options].find((x) => x.value === '0'); if (o) o.textContent = SRC.categoryName || 'label';
     $('mode').value = '0'; $('mode').dispatchEvent(new Event('change'));
@@ -1305,7 +1349,15 @@ function parity(n = 200) {
 
 // The dataset menu works from the first moment, not only once the map is built: picking another source mid-build reloads
 // the page on it, which abandons the build (and a feed that never answers).
+// the panel's four tabs (Look, Method, Evaluation, About); the open one is remembered per browser
+function wireTabs() {
+  const tabs = [...document.querySelectorAll('#tabs [role=tab]')];
+  const pick = (id, focus) => { for (const t of tabs) { const on = t.dataset.tab === id; t.setAttribute('aria-selected', on); t.tabIndex = on ? 0 : -1; $(t.dataset.tab).hidden = !on; if (on && focus) t.focus(); } try { localStorage.setItem('jet.tab', id); } catch {} };
+  for (const t of tabs) { t.addEventListener('click', () => pick(t.dataset.tab)); t.addEventListener('keydown', (e) => { const i = tabs.indexOf(t), d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0; if (d) { e.preventDefault(); pick(tabs[(i + d + tabs.length) % tabs.length].dataset.tab, true); } }); }
+  let saved = null; try { saved = localStorage.getItem('jet.tab'); } catch {} pick(tabs.some((t) => t.dataset.tab === saved) ? saved : 't-look');
+}
 function wireSource() {
+  wireTabs();
   // 3D: cast the map into three dimensions and back at any time (cast3d.js); the 2D live map keeps running underneath
   $('view3d')?.addEventListener('click', async (e) => {
     e.preventDefault(); if (!data?.baseXY || !engine || state.castToggling) return;
@@ -1393,7 +1445,7 @@ function wire() {
   $('golive').addEventListener('click', goLive);
   $('reset').addEventListener('click', resetToBase); wireTail();
 }
-async function resetToBase() { if (state.playing) setPlaying(false); engine.reset(); renderer.updateLabels(0, data.N); await engine.baseRanksReady; scores.fill(0); state.placeBins.clear(); state.ledgerLog = []; state.lastWave = null; state.rebuildMarks = []; state.lastRebuildClock = data.baseSeconds; state.lastRebuildPlayed = playedNow(); recomputeScores(0); updateBaseP5(); applyThreshold(); state.cumulativeMs = 0; state.log = []; state.lastStats = null; setClock(data.baseSeconds); state.achieved = 0; renderer.resetAppear(); state.countFrom = data.baseSeconds; if (view.on) viewExit(); snapClear(); regionHist.clear(); state.histMinute = -1; if (regions) { for (const r of regions.regions) { r.count = r.countBase; r.arr = 0; } regionS.fill(-1); assignRegions(0, data.nBase); regionRates(); recordHistory('base'); showRegion(); } snapOpen('base'); updateReadouts(null); render(); drawTimeline(); legend(); status('Reset: base map only.'); }
+async function resetToBase() { if (state.playing) setPlaying(false); engine.reset(); renderer.updateLabels(0, data.N); await engine.baseRanksReady; scores.fill(0); state.placeBins.clear(); state.ledgerLog = []; state.lastWave = null; state.rebuildMarks = []; state.lastRebuildClock = data.baseSeconds; state.lastRebuildPlayed = playedNow(); recomputeScores(0); updateBaseP5(); applyThreshold(); state.cumulativeMs = 0; state.log = []; state.lastStats = null; setClock(data.baseSeconds); state.achieved = 0; renderer.resetAppear(); state.countFrom = data.baseSeconds; if (view.on) viewExit(); snapClear(); regionHist.clear(); state.histMinute = -1; if (regions) { for (const r of regions.regions) { r.count = r.countBase; r.arr = 0; } regionS.fill(-1); assignRegions(0, data.nBase); regionRates(); recordHistory('base'); showRegion(); } snapOpen('base'); updateReadouts(null); render(); drawTimeline(); legend(); $('play').textContent = playLabel(); status('Back to the starting map.'); }
 function wireTail() {
   $('speed').addEventListener('input', (e) => { state.speed = +e.target.value; $('speedv').textContent = state.speed; });
   $('interval').addEventListener('change', (e) => { state.interval = +e.target.value; state.worker?.postMessage({ type: 'batch', batchSeconds: Math.min(state.interval, 5) }); });
@@ -1442,6 +1494,7 @@ function wireTail() {
 
 async function main() {
   if (BAD_SOURCE) { const known = Object.keys(DATASETS).join(', '); status(`There is no dataset called "${BAD_SOURCE}". Use ?source= with one of ${known}, or open the page without ?source= for live Bluesky posts.`, true); return; }
+  loadStep(0); gate(true);
   try {
     if (!navigator.gpu) throw new Error('WebGPU is not available in this browser. Use Chrome, Edge or Safari 26 with WebGPU enabled.');
     $('capname').textContent = SRC.static ? SRC.feed : SRC.what[0].toUpperCase() + SRC.what.slice(1);   // the map caption: what is shown, then how
@@ -1450,7 +1503,7 @@ async function main() {
     wireSource();
     let col = null, N;
     if (FRESH) N = SRC.static ? CAP + 4096 : 40000 + CAP;   // room for up to 40,000 base posts (a static dataset: up to 256,000 rows in all); the preview fits need the device before the base is known
-    else { data = await loadData(CAPTURE_URL, BASE, status, CAP); N = data.N; }
+    else { data = await loadData(CAPTURE_URL, BASE, status, CAP); N = data.N; loadStep(1); }
     const dim = FRESH ? (SRC.dim || 384) : data.dim;
     const needBind = Math.max(64 * N * 4, (N + FLUSH_CAP) * dim * 4);   // features carry FLUSH_CAP scratch rows for list refreshes
     if (adapter.limits.maxStorageBufferBindingSize < needBind) throw new Error('This GPU cannot bind a ' + (needBind / 1048576).toFixed(0) + ' MB storage buffer; lower ?cap=');
@@ -1462,13 +1515,13 @@ async function main() {
       if (!HANDOFF || HANDOFF.source !== SOURCE || (RECORDED && HANDOFF.recKey !== REC_KEY) || (SRC.dim && HANDOFF.dim !== SRC.dim)) { console.warn('[jet] no handed-over base for this source; fitting as usual'); HANDOFF = null; const u = new URL(location.href); u.searchParams.delete('base'); history.replaceState(null, '', u); }
       if (HANDOFF) $('h1sub').textContent += ' · tuned base';
     }
-    if (FRESH) { col = HANDOFF?.later ? await handoffCollect(device) : await freshCollect(FRESH, device); data = await freshBuild(device, col, SRC.static ? Math.max(0, (SRC.rowsLoaded || 0) - col.basePosts.length) + 4096 : CAP); if (col.catIndex) { data.catIndex = col.catIndex; data.catOther = col.catOther; } state.cacheDb = col.db; } state.countFrom = data.baseSeconds;
+    if (FRESH) { col = HANDOFF?.later ? await handoffCollect(device) : await freshCollect(FRESH, device); loadStep(1); data = await freshBuild(device, col, SRC.static ? Math.max(0, (SRC.rowsLoaded || 0) - col.basePosts.length) + 4096 : CAP); if (col.catIndex) { data.catIndex = col.catIndex; data.catOther = col.catOther; } state.cacheDb = col.db; } state.countFrom = data.baseSeconds;
     const info = adapter.info || {}; $('r-gpu').textContent = [info.vendor, info.architecture, info.description].filter(Boolean).join(' · ') || 'adapter details hidden by the browser';
     engine = new StreamingEngine(device, data, { lazyLedger: !!SRC.static }); await engine.checkShaders();
     renderer = new PointRenderer(device, $('map'), engine, data); renderer.onRedraw = () => render(); scores = new Float32Array(data.N);   // onRedraw: a draw skipped by the queue guard is made up once the GPU catches up
     engine.onLabels = (s, w) => renderer.updateLabels(s, w);
-    status('scoring the base map'); await engine.baseRanksReady; recomputeScores(0); updateBaseP5(); applyThreshold();
-    countArrivals(0, data.n); setClock(data.baseSeconds); state.lastRebuildClock = data.baseSeconds; wire(); renderer.mode = +$('mode').value; status('computing regions of the base map'); try { const r = await fetch('./nsfw_words.txt', { cache: 'no-store' }); if (r.ok) { const n = setNsfwWords(await r.text()); console.info('[jet] nsfw list', n); } } catch (e) { console.warn('[jet] nsfw list not loaded', e); } relabel(); status('choosing the region grain'); await new Promise(r => setTimeout(r, 20)); autoLook({ grain: true }); await buildRegions(); snapOpen('base'); legend(); render(); drawTimeline(); updateReadouts(null);
+    status('Scoring the starting map…'); await engine.baseRanksReady; recomputeScores(0); updateBaseP5(); applyThreshold();
+    countArrivals(0, data.n); setClock(data.baseSeconds); state.lastRebuildClock = data.baseSeconds; wire(); renderer.mode = +$('mode').value; loadStep(2); status('Finding the regions of the map…'); try { const r = await fetch('./nsfw_words.txt', { cache: 'no-store' }); if (r.ok) { const n = setNsfwWords(await r.text()); console.info('[jet] nsfw list', n); } } catch (e) { console.warn('[jet] nsfw list not loaded', e); } relabel(); status('Choosing how fine the regions are…'); await new Promise(r => setTimeout(r, 20)); autoLook({ grain: true }); await buildRegions(); snapOpen('base'); legend(); render(); drawTimeline(); updateReadouts(null);
     const bm = data.baseMeta, dropped = bm.dropped_base_window_replies || 0;
     if (FRESH) {
       document.title = SRC.static ? `UMAP Instant · ${SRC.feed}` : `UMAP Instant · ${SRC.feed}, last ${FRESH} min`; $('base').parentElement.hidden = true;
@@ -1489,10 +1542,10 @@ async function main() {
         // the chips wait out the glide (laid out every frame they would cost layout time and pop in and out as the zoom
         // changes) and fade in once the map has settled
         const ch = $('chips'); state.chipsHold = true; ch.style.opacity = '0';
-        crossfadeToken++; state.morphing = true; renderer.settle = 0; renderer.rmix = 0; drawFrame(); $('map').style.visibility = ch.style.visibility = ''; $('preview').hidden = true;
+        loadStep(3); crossfadeToken++; state.morphing = true; renderer.settle = 0; renderer.rmix = 0; drawFrame(); $('map').style.visibility = ch.style.visibility = ''; $('preview').hidden = true;
         glide(2500, (e) => { renderer.view.cx = from.cx + (target.cx - from.cx) * e; renderer.view.cy = from.cy + (target.cy - from.cy) * e; renderer.view.scale = from.scale + (target.scale - from.scale) * e; }).then(() => {
-          state.chipsHold = false; render(); ch.style.transition = 'opacity .45s ease'; requestAnimationFrame(() => { ch.style.opacity = ''; }); setTimeout(() => { ch.style.transition = ''; }, 600); if (SRC.static) staticDone(); if (UNTIL) engine.ledgerReady; });   // a rewound map: Play's placement needs the ledger; started once the glide is over
-      } else { $('map').style.visibility = $('chips').style.visibility = ''; $('preview').hidden = true; if (SRC.static) staticDone(); }
+          loadDone(); state.chipsHold = false; render(); ch.style.transition = 'opacity .45s ease'; requestAnimationFrame(() => { ch.style.opacity = ''; }); setTimeout(() => { ch.style.transition = ''; }, 600); if (SRC.static) staticDone(); if (UNTIL) engine.ledgerReady; });   // a rewound map: Play's placement needs the ledger; started once the glide is over
+      } else { $('map').style.visibility = $('chips').style.visibility = ''; $('preview').hidden = true; loadDone(); if (SRC.static) staticDone(); }
       if (HANDOFF?.view) { Object.assign(renderer.view, viewFrom(HANDOFF.view, renderer.canvas.getBoundingClientRect())); render(); }   // the tuner's view, unchanged
       dropSnapshot();   // this page's own map is drawn: the previous page's picture fades out
       if (!SRC.static) status(HANDOFF ? `Base map from the tuner · ${(data.n - data.nBase).toLocaleString()} arriving` : `Base map fitted · ${(data.n - data.nBase).toLocaleString()} arriving`);
@@ -1503,7 +1556,7 @@ async function main() {
       $('r-base').textContent = `${data.nBase.toLocaleString()} ${bm.originals_only ? 'original (non-reply) ' : ''}posts from the first ${mmss(data.baseSeconds)}${dropped ? ` (${dropped.toLocaleString()} replies in that window left out)` : ''}; stream = ${(data.n - data.nBase).toLocaleString()} posts · ${data.labels.length} topic clusters`;
       $('r-encoder').textContent = `${data.model} (${data.dim}-dim${bm.pooling ? ', ' + bm.pooling + ' pooling' : ''}); embedded in the relay, never in the browser`;
       $('r-filter').textContent = filterText(cs);
-      status('Ready');
+      loadStep(3); loadDone(); status('Ready');
     }
     window.jet = { get tuner() { return tuner; }, get cast() { return cast; }, get regionPrevS() { return regionPrevS; }, engine, renderer, data, state, events, stepOnce, runTo, get scores() { return scores; }, flushPending, drawFrame, displayClock, kickAnim, parity, strandedCurve, enforceBudget, compactAll, doRebuild, requestRebuild, get regions() { return regions; }, buildRegions, regionRates, regionSpark, regionHist, showRegion, setFocus, render, layoutChips, snaps, get live() { return live; }, view, viewTo, viewExit, viewFinish, timelapse, snapBytes, setFooter, drawLineage, lineage };
   } catch (e) { console.error(e); status('Error: ' + e.message, true); }

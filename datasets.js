@@ -24,6 +24,8 @@ export const DATASETS = {
     label: 'ASRS safety reports', what: 'ASRS aviation safety reports', noun: 'reports', one: 'report', kind: 'vectors',
     local: '../data/jetstream_demo/static/asrs/', time: 'month', date: (r) => Date.UTC(+r.month.slice(0, 4), +r.month.slice(5, 7) - 1),
     category: (r) => r.cat, categoryName: 'anomaly label',
+    // how label words are shown (names are computed lower case): the aviation acronyms in their usual casing
+    caps: ['TCAS II', 'TCAS', 'TRACON', 'IMC', 'VMC', 'VFR', 'IFR', 'TFR', 'ATC', 'ATIS', 'ARTCC', 'CTAF', 'NOTAM', 'RNAV', 'ILS', 'VOR', 'DME', 'GPS', 'FMS', 'FMC', 'MCP', 'APU', 'MEL', 'QRH', 'ASRS', 'FAA', 'TA', 'RA', 'UAS', 'ADS-B', 'LOC', 'GS', 'PAPI', 'CFI', 'ATP', 'FBO', 'SID', 'STAR', 'NMAC', 'UAV', 'PDC'],   // a phrase also matches written as one word (tcasii)
   },
   'wine-reviews': {
     label: 'Wine reviews', what: 'wine reviews (Wine Enthusiast)', noun: 'reviews', one: 'review', kind: 'text',

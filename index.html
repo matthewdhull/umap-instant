@@ -75,12 +75,30 @@ try { const s = JSON.parse(sessionStorage.getItem('jet.snap') || 'null'); sessio
   #fitbar { position:absolute; left:50%; top:-46px; transform:translateX(-50%); display:flex; gap:8px; align-items:center; padding:6px 8px 6px 12px; background:var(--panel, #12161d); border:1px solid var(--line); border-radius:8px; box-shadow:0 4px 18px rgba(0,0,0,.35); white-space:nowrap; z-index:5 }
   #fitbar[hidden] { display:none } canvas#timeline, canvas#lineage { width:100%; height:114px; display:block; cursor:pointer; touch-action:none }
   button.on { border-color:var(--amber); color:var(--amber) } #r-view { font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  /* side panel: the primary action and stats above four tabs (Look, Method, Evaluation, About); a label may carry its technical name below it */
+  .ctl, .ctl.check, .ctl.wide { grid-template-columns:132px minmax(0,1fr) auto } .ctl.check, .ctl.wide { grid-template-columns:132px 1fr } dl { grid-template-columns:132px 1fr }
+  .ctl > .lbl { white-space:normal; overflow:visible; line-height:1.25 } .lbl small, dt small { display:block; font-size:11.5px; color:var(--dim); line-height:1.25 }
+  .stats { display:flex; flex-wrap:wrap; column-gap:6px; row-gap:2px; font-size:13px; color:var(--mut); font-variant-numeric:tabular-nums } .stats b { color:var(--ink); font-weight:600 } .stats .arr { color:#ffd966 } .stats > span:empty { display:none } .stats > span + span:not(:empty)::before { content:"·"; margin-right:6px; color:var(--dim) }
+  button.primary { background:#2b3a1f; border-color:#4b6a2a; font-weight:600; padding:6px 16px }
+  .tabs { display:flex; gap:2px; border-bottom:1px solid var(--line); margin:2px -14px 0; padding:0 10px; position:sticky; top:-12px; background:var(--panel); z-index:6 }
+  .tabs button { background:none; border:0; border-bottom:2px solid transparent; border-radius:0; padding:8px 10px 7px; font-size:13px; color:var(--mut) } .tabs button:hover { color:var(--ink) } .tabs button[aria-selected=true] { color:var(--ink); border-bottom-color:var(--amber) }
+  .tabpane h3 { font-size:13px; font-weight:600; color:var(--ink); margin:6px 0 -2px } .tabpane > .hint { margin:0 }
+  details.more > summary, details#g-eval > summary { font-size:13px; letter-spacing:0; text-transform:none; color:var(--mut); font-weight:500 } details.more[open] > summary, details#g-eval[open] > summary { color:var(--ink) }
+  aside.loading .gate { opacity:.45; pointer-events:none; transition:opacity .4s }
+  /* the staged loading card over the converging cloud */
+  #loadcard { position:absolute; left:50%; bottom:54px; transform:translateX(-50%); z-index:6; width:min(440px, calc(100% - 32px)); display:flex; flex-direction:column; gap:5px; padding:10px 14px 11px; background:rgba(18,24,35,.9); border:1px solid var(--line); border-radius:10px; box-shadow:0 6px 24px rgba(0,0,0,.4); pointer-events:none; transition:opacity .6s }
+  #loadcard.gone { opacity:0 } #loadcard b { font-size:13.5px; font-weight:600 } #loadcard #lc-step { font-size:13px; color:var(--mut) } #loadcard small { font-size:12px; color:var(--dim); min-height:1.3em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .lc-bar { display:flex; gap:4px } .lc-bar i { flex:1; height:3px; border-radius:2px; background:#2a3446; transition:background .4s } .lc-bar i.done { background:var(--live) } .lc-bar i.now { background:var(--amber) }
+  /* the one-time caption under the map caption */
+  #intro { margin-top:8px; max-width:380px; padding:9px 12px; background:rgba(18,24,35,.92); border:1px solid var(--line); border-radius:8px; pointer-events:auto; text-shadow:none; display:flex; flex-direction:column; align-items:flex-start; gap:8px }
+  #intro p { margin:0; font-size:13px; line-height:1.45; color:var(--ink) } #intro button { font-size:12.5px; padding:3px 10px }
+  @media (max-width:900px) { .tabs { top:0 } #intro { max-width:none } }
 </style>
 </head>
 <body>
 <header><h1><span class="brand" role="img" aria-label="UMAP Instant"><svg viewBox="0 0 240 64" aria-hidden="true"><g fill="#6f9ad6"><circle cx="38.5" cy="15.5" r="2.3"/><circle cx="44" cy="12.5" r="2"/><circle cx="47.5" cy="18" r="2.5"/><circle cx="42" cy="21" r="2"/><circle cx="50.5" cy="23.5" r="1.6"/><circle cx="37" cy="9.5" r="1.4"/></g><g fill="#59c3a0"><circle cx="44" cy="40" r="2.5"/><circle cx="50" cy="37" r="2.1"/><circle cx="52.5" cy="43.5" r="2.3"/><circle cx="46.5" cy="46.5" r="1.9"/><circle cx="55.5" cy="49" r="1.5"/><circle cx="39.5" cy="45" r="1.4"/></g><g fill="#b48ac9"><circle cx="20" cy="52.5" r="2.2"/><circle cx="26" cy="55.5" r="1.9"/><circle cx="27.5" cy="49" r="1.6"/><circle cx="15.5" cy="57" r="1.3"/></g><g stroke="#e0a94a" stroke-width="0.9" stroke-linecap="round" opacity="0.75" fill="none"><path d="M33.5 26.5 L38.5 15.5"/><path d="M33.5 26.5 L42 21"/><path d="M33.5 26.5 L44 40"/></g><g fill="#e0a94a"><circle cx="5" cy="52" r="1" opacity="0.3"/><circle cx="10" cy="45.5" r="1.25" opacity="0.45"/><circle cx="15.5" cy="39.5" r="1.5" opacity="0.6"/><circle cx="21.5" cy="34.5" r="1.8" opacity="0.75"/><circle cx="27.5" cy="30" r="2.1" opacity="0.9"/></g><circle cx="33.5" cy="26.5" r="6.2" fill="none" stroke="#e0a94a" stroke-width="1.1" opacity="0.55"/><circle cx="33.5" cy="26.5" r="10" fill="none" stroke="#e0a94a" stroke-width="0.8" opacity="0.25"/><circle cx="33.5" cy="26.5" r="3.2" fill="#e0a94a"/><circle cx="32.4" cy="25.4" r="1" fill="#fff4dc"/><g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" transform="translate(74 11.5)"><path d="M4 4 V24 A13 13 0 0 0 30 24 V4"/><path d="M44 41 V4 L60 26 L76 4 V41"/><path d="M90 41 L106 4 L122 41 M96 28 H116"/><path d="M136 41 V4 H150 A10.5 10.5 0 0 1 150 25 H136"/></g></svg><span class="rt">INSTANT</span></span></h1><span id="livebadge">LIVE</span><span class="hspace"></span><a id="view3d" class="switch" href="#">3D</a><a id="tunerLink" class="switch" href="./tune.html">Base map tuner</a></header>
-<div class="stage"><p id="status" role="status">Loading…</p><div id="mapcaption"><b id="capname"></b><span id="h1sub"></span></div><canvas id="map"></canvas><canvas id="map3d" hidden></canvas><div id="gizmo3d" hidden></div><canvas id="preview" hidden></canvas><div id="ticker"></div><div id="chips"></div><canvas id="loupe" hidden></canvas><details class="legend" id="legendBox"><summary>Legend</summary><div id="legend"></div></details></div>
-<aside>
+<div class="stage"><p id="status" role="status" class="quiet">Loading…</p><div id="mapcaption"><b id="capname"></b><span id="h1sub"></span><div id="intro" hidden><p id="intro-text"></p><button id="intro-x">Got it</button></div></div><div id="loadcard" role="status" aria-live="polite"><b id="lc-title">Loading…</b><span id="lc-step"></span><span class="lc-bar" id="lc-bar"><i></i><i></i><i></i><i></i></span><small id="lc-detail"></small></div><canvas id="map"></canvas><canvas id="map3d" hidden></canvas><div id="gizmo3d" hidden></div><canvas id="preview" hidden></canvas><div id="ticker"></div><div id="chips"></div><canvas id="loupe" hidden></canvas><details class="legend" id="legendBox"><summary>Legend</summary><div id="legend"></div></details></div>
+<aside class="loading">
   <section id="tune" class="controls" hidden><h2>Base map</h2>
     <div class="ctl"><span class="lbl">On change</span><select id="tu-mode"><option value="move">move from here</option><option value="refit">refit from the start</option></select><span class="val"></span></div>
     <div class="ctl" id="tu-restartRow"><span class="lbl indent">restart</span><input id="tu-restart" type="range" min="0.02" max="1" step="0.02"><span class="val" id="tu-restartv"></span></div>
@@ -96,11 +114,10 @@ try { const s = JSON.parse(sessionStorage.getItem('jet.snap') || 'null'); sessio
     <div class="row"><button id="tu-undo">Undo tuning</button><span id="tu-state" class="hint"></span><span id="tu-ab" class="hint"></span></div>
   </section>
   <section class="controls" id="g-top">
-    <div class="row"><button id="play" class="primary">Play</button><button id="fullmap" hidden>Full map</button><button id="golive" class="live">Go live</button><button id="rebuildNow">Rebuild now</button><span id="r-next" class="hint"></span></div>
-    <div class="row"><button id="lineage-btn">Lineage</button><button id="replay30">Replay the hour in 30 s</button></div>
-    <div class="ctl wide"><span class="lbl">Rewind</span><span id="r-view" class="val left">off</span></div>
-    <div class="ctl"><span class="lbl">Speed</span><input id="speed" type="range" min="1" max="120" value="10"><span class="val"><span id="speedv">10</span>× real time</span></div>
-    <div class="strip"><span id="s-time">—</span><span id="s-map">—</span><span id="s-arr">—</span><span id="s-ms">—</span></div>
+    <div class="ctl wide" id="srcRow"><span class="lbl">Data</span><span class="srcpick"><select id="livesrc"><optgroup label="Live"><option value="browser">Bluesky posts (Jetstream)</option><option value="wikipedia">Wikipedia edits (EventStreams)</option><option value="nostr">Nostr notes (public relays)</option><option value="hackernews">Hacker News (API)</option><option value="opensky">Aircraft (OpenSky ADS-B)</option></optgroup><optgroup label="Datasets" id="srcDatasets"></optgroup></select><button type="button" id="srcBtn" aria-haspopup="listbox" aria-expanded="false"></button><div id="srcList" role="listbox" hidden></div></span></div>
+    <div class="row gate" id="actions"><button id="play" class="primary">Play the hour</button><button id="fullmap" hidden>Full map</button><button id="golive">Go live</button></div>
+    <div class="stats gate" id="stats"><span id="s-time"></span><span id="s-map"></span><span id="s-arr"></span></div>
+    <div class="ctl wide" id="r-viewRow" hidden><span class="lbl">Viewing</span><span id="r-view" class="val left">off</span></div>
   </section>
   <section id="region" class="controls" hidden><h2>Region</h2>
     <div id="region-title" class="strong">—</div>
@@ -115,86 +132,102 @@ try { const s = JSON.parse(sessionStorage.getItem('jet.snap') || 'null'); sessio
     <div id="inspect-title" class="strong">—</div>
     <div id="inspect-post" class="post"></div>
     <div id="inspect-body" class="hint"></div>
-    <div class="row"><label><input type="radio" name="im" id="im-both" value="both" checked> both</label><label><input type="radio" name="im" id="im-neighbours" value="neighbours"> neighbours only</label><label><input type="radio" name="im" id="im-adopters" value="adopters"> adopters only</label><button id="inspect-clear">Clear</button></div>
+    <div class="row"><label><input type="radio" name="im" id="im-both" value="both" checked> both</label><label><input type="radio" name="im" id="im-neighbours" value="neighbours"> nearest by meaning</label><label><input type="radio" name="im" id="im-adopters" value="adopters"> listed by</label><button id="inspect-clear">Clear</button></div>
     <div id="inspect-nbrs"></div>
   </section>
-  <details class="controls" id="g-look" data-remember><summary>Look</summary>
-    <div class="ctl wide"><span class="lbl">Colour by</span><select id="mode"><option value="6" selected>region</option><option value="0">topic cluster</option><option value="1">arrival time</option><option value="2">base map vs streamed</option><option value="5">reply vs original</option><option value="4">latest flush</option><option value="3">local fit score</option></select></div>
-    <div class="ctl wide"><span class="lbl">Heat</span><select id="heat"><option value="off" selected>off</option><option value="growth">growth · vs base share</option><option value="volume">volume · arrival rate</option></select></div>
-    <div class="ctl auto-set" id="ctl-heatwin"><span class="lbl indent">window</span><input id="heatWin" type="range" min="60" max="1800" step="30" value="60" disabled><span class="val"><span id="heatWinv">60</span> s<button class="pill on" data-auto="heatWin">auto</button></span></div>
-    <div class="ctl"><span class="lbl indent">palette</span><span class="pals" id="heatPals"></span><span class="val" id="heatPalv">ember</span></div>
+  <nav class="tabs gate" id="tabs" role="tablist"><button role="tab" data-tab="t-look" aria-selected="true">Look</button><button role="tab" data-tab="t-method" aria-selected="false">Method</button><button role="tab" data-tab="t-eval" aria-selected="false">Evaluation</button><button role="tab" data-tab="t-about" aria-selected="false">About</button></nav>
+  <div class="tabpane controls gate" id="t-look" role="tabpanel">
+    <div class="ctl wide"><span class="lbl">Colour by</span><select id="mode"><option value="6" selected>region</option><option value="0">topic</option><option value="1">when it arrived</option><option value="2">starting map or new arrival</option><option value="5">reply or original</option><option value="4">latest update</option><option value="3">how well placed</option></select></div>
+    <div class="ctl wide"><span class="lbl">Heat</span><select id="heat"><option value="off" selected>off</option><option value="growth">fastest-growing regions</option><option value="volume">busiest regions</option></select></div>
     <div class="ctl"><span class="lbl">Point size</span><input id="psize" type="range" min="1" max="6" step="0.2" value="2.0"><span class="val"></span></div>
-    <div class="ctl"><span class="lbl">Settled dimming</span><input id="dim" type="range" min="0.1" max="1" step="0.05" value="0.35"><span class="val"></span></div>
-    <div class="ctl auto-set" id="ctl-recent"><span class="lbl">Emphasised for</span><input id="recent" type="range" min="5" max="600" step="5" value="15" disabled><span class="val"><span id="recentv">15</span> s<button class="pill on" data-auto="recent">auto</button></span></div>
-    <div class="ctl"><span class="lbl">Emphasis</span><input id="boost" type="range" min="0" max="3" step="0.1" value="1.5"><span class="val"><span id="boostv">1.5</span>×</span></div>
-    <div class="ctl check"><span class="lbl">Tints</span><label><input type="checkbox" id="regionsOn" checked> soft regions</label></div>
-    <div class="ctl"><span class="lbl indent">strength</span><input id="regionAlpha" type="range" min="0" max="1" step="0.05" value="0.7"><span class="val"></span></div>
-    <div class="ctl auto-set" id="ctl-grain"><span class="lbl indent">grain</span><input id="regionSigma" type="range" min="2" max="12" step="1" value="4" disabled><span class="val"><span id="regionSigmav">4</span> px<button class="pill on" data-auto="sigma">auto</button></span></div>
-    <div class="ctl auto-set" id="ctl-soft"><span class="lbl indent">edge softness</span><input id="regionSoft" type="range" min="2" max="14" step="1" value="6" disabled><span class="val"><span id="regionSoftv">6</span> px<button class="pill on" data-auto="soft">auto</button></span></div>
-    <div class="ctl auto-set" id="ctl-tau"><span class="lbl indent">merge saddles</span><input id="regionTau" type="range" min="0.02" max="0.5" step="0.02" value="0.1" disabled><span class="val"><span id="regionTauv">0.1</span> of peak<button class="pill on" data-auto="tau">auto</button></span></div>
-    <div class="ctl wide"><span class="lbl indent">tint colour</span><select id="regionTint"><option value="topic">majority topic cluster</option><option value="pastel">distinct pastel</option></select></div>
-    <div class="ctl check"><span class="lbl">Chips</span><label><input type="checkbox" id="chipsOn" checked> count and <b style="color:#ffd966">+N</b> arrivals</label></div>
-    <div class="ctl"><span class="lbl indent">words</span><span id="chipWords"></span><span class="val"></span></div>
-    <div class="ctl"><span class="lbl">Focus ghosting</span><input id="ghost" type="range" min="0" max="0.3" step="0.01" value="0.05"><span class="val unit">opacity</span></div>
-    <div class="ctl check"><span class="lbl">Growth layer</span><label><input type="checkbox" id="growth"> recent-arrival density</label></div>
-    <div class="ctl"><span class="lbl indent">window</span><input id="gwin" type="range" min="10" max="900" step="10" value="120"><span class="val"><span id="gwinv">120</span> s</span></div>
-    <div class="ctl"><span class="lbl indent">intensity</span><input id="gden" type="range" min="1" max="30" step="0.5" value="6"><span class="val"></span></div>
-  </details>
-  <details class="controls" id="g-method" data-remember><summary>Method</summary>
-    <div class="row"><button id="step">Step one flush</button><button id="reset">Reset to base map</button></div>
-    <div class="ctl"><span class="lbl">Flush every</span><select id="interval"><option value="0.1">0.1 s</option><option value="0.25">0.25 s</option><option value="0.5" selected>0.5 s</option><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option><option value="10">10 s</option><option value="30">30 s</option></select><span class="val unit">of stream time</span></div>
-    <div class="ctl wide"><span class="lbl">Base map</span><select id="base"></select></div>
-    <div class="ctl wide"><span class="lbl">Source</span><span class="srcpick"><select id="livesrc"><optgroup label="Live"><option value="browser">Bluesky posts (Jetstream)</option><option value="wikipedia">Wikipedia edits (EventStreams)</option><option value="nostr">Nostr notes (public relays)</option><option value="hackernews">Hacker News (API)</option><option value="opensky">Aircraft (OpenSky ADS-B)</option></optgroup><optgroup label="Datasets" id="srcDatasets"></optgroup></select><button type="button" id="srcBtn" aria-haspopup="listbox" aria-expanded="false"></button><div id="srcList" role="listbox" hidden></div></span></div>
-    <div class="ctl check"><span class="lbl">Names</span><label><input type="checkbox" id="nsfwOn" checked> hide NSFW words</label></div>
-    <div class="ctl"><span class="lbl">History budget</span><input id="budget" type="number" min="0" step="1000" value="0"><span class="val unit">arrivals · 0 = auto</span></div>
-    <div class="ctl"><span class="lbl">Rebuild</span><span class="two"><label class="chk"><input type="checkbox" id="autoRebuild" checked> every</label><input id="rebuildMin" type="number" min="0.5" step="0.5" value="0.5"></span><span class="val unit">min played</span></div>
-    <div class="ctl"><span class="lbl indent">or after</span><input id="rebuildArrivals" type="number" min="0" step="1" value="0"><span class="val unit">k arrivals · 0 = off</span></div>
-    <div class="ctl"><span class="lbl indent">leash</span><input id="leash" type="range" min="0" max="60" step="1" value="30"><span class="val"><span id="leashv">30</span></span></div>
-    <div class="ctl"><span class="lbl indent">morph</span><input id="morphMs" type="range" min="0" max="6" step="0.5" value="3"><span class="val"><span id="morphv">3</span> s</span></div>
-  </details>
-  <details class="controls" id="g-eval" data-remember><summary>Evaluation</summary>
-    <div class="ctl check"><span class="lbl">Solver path</span><label><input type="checkbox" id="settleOn"> animate start → final</label></div>
-    <div class="ctl"><span class="lbl indent">duration</span><input id="settleMs" type="range" min="0" max="1500" step="50" value="500"><span class="val"><span id="settlev">500</span> ms</span></div>
-    <div class="ctl wide"><span class="lbl">2-D window</span><select id="window"><option value="15">15 nearest on the map</option><option value="30" selected>30 nearest</option><option value="50">50 nearest</option><option value="100">100 nearest</option></select></div>
-    <div class="ctl check"><span class="lbl">Stranded</span><label><input type="checkbox" id="stranded"> ring recent stranded</label></div>
-    <div class="ctl check"><span class="lbl">Threshold</span><label><input type="checkbox" id="thrAuto" checked> base map's 5th percentile</label></div>
-    <div class="ctl"><span class="lbl indent">manual</span><input id="thrKept" type="range" min="1" max="15" value="4" disabled><span class="val unit">kept of 15</span></div>
-    <div id="thrv" class="hint sub">—</div>
-    <div class="row"><button id="scoreBins">Local fit by 10-minute bin</button></div>
-    <div id="r-bins" class="hint"></div>
+    <div class="ctl check"><span class="lbl">Labels</span><label><input type="checkbox" id="chipsOn" checked> name each region</label></div>
+    <details class="controls more" id="g-look-more" data-remember><summary>More look settings</summary>
+      <div class="ctl auto-set" id="ctl-heatwin"><span class="lbl">Heat looks back</span><input id="heatWin" type="range" min="60" max="1800" step="30" value="60" disabled><span class="val"><span id="heatWinv">60</span> s<button class="pill on" data-auto="heatWin">auto</button></span></div>
+      <div class="ctl"><span class="lbl">Heat colours</span><span class="pals" id="heatPals"></span><span class="val" id="heatPalv">ember</span></div>
+      <div class="ctl"><span class="lbl">Fade older posts<small>settled dimming</small></span><input id="dim" type="range" min="0.1" max="1" step="0.05" value="0.35"><span class="val"></span></div>
+      <div class="ctl auto-set" id="ctl-recent"><span class="lbl">Highlight new posts for</span><input id="recent" type="range" min="5" max="600" step="5" value="15" disabled><span class="val"><span id="recentv">15</span> s<button class="pill on" data-auto="recent">auto</button></span></div>
+      <div class="ctl"><span class="lbl">Highlight strength</span><input id="boost" type="range" min="0" max="3" step="0.1" value="1.5"><span class="val"><span id="boostv">1.5</span>×</span></div>
+      <div class="ctl check"><span class="lbl">Region shading</span><label><input type="checkbox" id="regionsOn" checked> shade each region</label></div>
+      <div class="ctl"><span class="lbl indent">strength</span><input id="regionAlpha" type="range" min="0" max="1" step="0.05" value="0.7"><span class="val"></span></div>
+      <div class="ctl auto-set" id="ctl-grain"><span class="lbl indent">Region detail<small>clustering grain</small></span><input id="regionSigma" type="range" min="2" max="12" step="1" value="4" disabled><span class="val"><span id="regionSigmav">4</span> px<button class="pill on" data-auto="sigma">auto</button></span></div>
+      <div class="ctl auto-set" id="ctl-soft"><span class="lbl indent">Edge softness</span><input id="regionSoft" type="range" min="2" max="14" step="1" value="6" disabled><span class="val"><span id="regionSoftv">6</span> px<button class="pill on" data-auto="soft">auto</button></span></div>
+      <div class="ctl auto-set" id="ctl-tau"><span class="lbl indent">Merge nearby regions<small>merge saddles, share of peak</small></span><input id="regionTau" type="range" min="0.02" max="0.5" step="0.02" value="0.1" disabled><span class="val"><span id="regionTauv">0.1</span><button class="pill on" data-auto="tau">auto</button></span></div>
+      <div class="ctl wide"><span class="lbl indent">Shade colour</span><select id="regionTint"><option value="topic">the region's main topic</option><option value="pastel">a distinct pastel</option></select></div>
+      <div class="ctl"><span class="lbl">Words per label</span><span id="chipWords"></span><span class="val"></span></div>
+      <div class="ctl"><span class="lbl">Fade the rest when a region is picked<small>focus ghosting</small></span><input id="ghost" type="range" min="0" max="0.3" step="0.01" value="0.05"><span class="val unit">opacity</span></div>
+      <div class="ctl check"><span class="lbl">Arrival glow<small>growth layer</small></span><label><input type="checkbox" id="growth"> glow where posts are arriving</label></div>
+      <div class="ctl"><span class="lbl indent">looks back</span><input id="gwin" type="range" min="10" max="900" step="10" value="120"><span class="val"><span id="gwinv">120</span> s</span></div>
+      <div class="ctl"><span class="lbl indent">brightness</span><input id="gden" type="range" min="1" max="30" step="0.5" value="6"><span class="val"></span></div>
+    </details>
+  </div>
+  <div class="tabpane controls gate" id="t-method" role="tabpanel" hidden>
+    <p class="hint" id="m-hint">New items are placed beside their nearest neighbours by meaning (Batched RevAdopt), and every so often the whole map is quietly re-laid out so it keeps fitting what has arrived (quiet rebuild, NodeGardener).</p>
+    <div class="controls" id="m-play"><h3>Playback</h3>
+    <div class="ctl"><span class="lbl">Playback speed</span><input id="speed" type="range" min="1" max="120" value="10"><span class="val"><span id="speedv">10</span>× real time</span></div>
+    <div class="ctl"><span class="lbl">Update every<small>flush interval</small></span><select id="interval"><option value="0.1">0.1 s</option><option value="0.25">0.25 s</option><option value="0.5" selected>0.5 s</option><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option><option value="10">10 s</option><option value="30">30 s</option></select><span class="val unit">of stream time</span></div>
+    <div class="row"><button id="step">Advance one update</button><button id="reset">Back to the starting map</button></div>
+    <div class="row"><button id="replay30">Replay the hour in 30 s</button><button id="lineage-btn">Region history</button></div></div>
+    <div class="controls" id="m-relayout"><h3>Re-layout</h3>
+    <div class="row"><button id="rebuildNow">Re-layout the map now</button><span id="r-next" class="hint"></span></div>
+    <div class="ctl"><span class="lbl">Re-layout every<small>quiet rebuild cadence</small></span><span class="two"><label class="chk"><input type="checkbox" id="autoRebuild" checked> on</label><input id="rebuildMin" type="number" min="0.5" step="0.5" value="0.5"></span><span class="val unit">min of play</span></div>
+    <div class="ctl"><span class="lbl indent">or after</span><input id="rebuildArrivals" type="number" min="0" step="1" value="0"><span class="val unit">thousand new · 0 = off</span></div>
+    <div class="ctl"><span class="lbl indent">glide</span><input id="morphMs" type="range" min="0" max="6" step="0.5" value="3"><span class="val"><span id="morphv">3</span> s</span></div></div>
+    <h3>Data</h3>
+    <div class="ctl wide"><span class="lbl">Starting map<small>base map</small></span><select id="base"></select></div>
+    <div class="ctl check"><span class="lbl">Label words</span><label><input type="checkbox" id="nsfwOn" checked> hide adult words</label></div>
+  </div>
+  <div class="tabpane controls gate" id="t-eval" role="tabpanel" hidden>
+    <p class="hint">Measurements of how faithfully the map keeps each item beside its true neighbours by meaning, and what each step costs. They are for checking the method; the map works without them.</p>
+    <details class="controls" id="g-eval" data-remember><summary>Evaluation (for researchers)</summary>
+      <div class="ctl check"><span class="lbl">Animate each placement<small>solver path</small></span><label><input type="checkbox" id="settleOn"> start → final position</label></div>
+      <div class="ctl"><span class="lbl indent">duration</span><input id="settleMs" type="range" min="0" max="1500" step="50" value="500"><span class="val"><span id="settlev">500</span> ms</span></div>
+      <div class="ctl wide"><span class="lbl">Nearby on the map means<small>2-D window</small></span><select id="window"><option value="15">the 15 nearest</option><option value="30" selected>the 30 nearest</option><option value="50">the 50 nearest</option><option value="100">the 100 nearest</option></select></div>
+      <div class="ctl check"><span class="lbl">Misplaced posts<small>few true neighbours nearby (stranded)</small></span><label><input type="checkbox" id="stranded"> ring recent ones</label></div>
+      <div class="ctl check"><span class="lbl">Misplaced means</span><label><input type="checkbox" id="thrAuto" checked> worse than 95 % of the starting map</label></div>
+      <div class="ctl"><span class="lbl indent">or fewer than</span><input id="thrKept" type="range" min="1" max="15" value="4" disabled><span class="val unit">of 15 nearby</span></div>
+      <div id="thrv" class="hint sub">—</div>
+      <div class="ctl"><span class="lbl">Leash on older posts<small>quiet rebuild leash</small></span><input id="leash" type="range" min="0" max="60" step="1" value="30"><span class="val"><span id="leashv">30</span></span></div>
+      <div class="ctl"><span class="lbl">Posts kept<small>history budget</small></span><input id="budget" type="number" min="0" step="1000" value="0"><span class="val unit">0 = automatic</span></div>
+      <div class="row"><button id="scoreBins">Placement quality by 10-minute stretch</button></div>
+      <div id="r-bins" class="hint"></div>
+      <dl>
+        <dt>Stream clock</dt><dd id="r-time">—</dd>
+        <dt>On the map</dt><dd id="r-mapsize">—</dd>
+        <dt>Last update placed</dt><dd id="r-arrivals">—</dd>
+        <dt>Placement quality<small>local fit</small></dt><dd id="r-fit">—</dd>
+        <dt>Misplaced<small>stranded</small></dt><dd id="r-stranded">—</dd>
+        <dt>Moved while placing</dt><dd id="r-settle">—</dd>
+        <dt>Lists changed<small>adopters</small></dt><dd id="r-adopters">—</dd>
+        <dt>Impostor ledger</dt><dd id="r-ledger">—</dd>
+        <dt>Re-layouts</dt><dd id="r-rebuild">none yet</dd>
+        <dt>Regions</dt><dd id="r-regions">—</dd>
+        <dt>Solver rounds<small>fixed-point iterations</small></dt><dd id="r-iters">—</dd>
+        <dt>Update time</dt><dd id="r-ms">—</dd>
+        <dt>Running total</dt><dd id="r-cum">—</dd>
+        <dt>Posts kept</dt><dd id="r-history">—</dd>
+        <dt>Replay hash</dt><dd id="r-hash">—</dd>
+      </dl>
+    </details>
+  </div>
+  <div class="tabpane controls gate" id="t-about" role="tabpanel" hidden>
+    <div class="notes">
+      <p>Every item is turned into a list of numbers that captures its meaning (an embedding; for text, MiniLM with 384 numbers), so similar items get similar numbers. The map is a UMAP layout of those numbers, fitted on your GPU: similar items sit together.</p>
+      <p>New items are placed beside their nearest neighbours as they arrive, and every so often the whole map is quietly re-laid out so it keeps fitting what has arrived (the project's names for these steps: Batched RevAdopt and NodeGardener).</p>
+      <p>Labels name a region by its most distinctive words; +N counts what arrived since Play. Click a label for the region, a dot for the item.</p>
+    </div>
     <dl>
-      <dt>Stream time</dt><dd id="r-time">—</dd>
-      <dt>Posts on the map</dt><dd id="r-mapsize">—</dd>
-      <dt>Arrivals placed</dt><dd id="r-arrivals">—</dd>
-      <dt>Local fit</dt><dd id="r-fit">—</dd>
-      <dt>Stranded</dt><dd id="r-stranded">—</dd>
-      <dt>Moved by placement</dt><dd id="r-settle">—</dd>
-      <dt>Adopters</dt><dd id="r-adopters">—</dd>
-      <dt>Impostor ledger</dt><dd id="r-ledger">—</dd>
-      <dt>Last rebuild</dt><dd id="r-rebuild">none yet</dd>
-      <dt>Regions</dt><dd id="r-regions">—</dd>
-      <dt>Iterations</dt><dd id="r-iters">—</dd>
-      <dt>Flush time</dt><dd id="r-ms">—</dd>
-      <dt>Running total</dt><dd id="r-cum">—</dd>
-      <dt>Replay hash</dt><dd id="r-hash">—</dd>
-    </dl>
-  </details>
-  <details class="controls" id="g-about" data-remember><summary>About</summary>
-    <dl>
-      <dt>Capture</dt><dd id="r-capture">—</dd>
-      <dt>Base map</dt><dd id="r-base">—</dd>
-      <dt>Encoder</dt><dd id="r-encoder">—</dd>
+      <dt>Heat</dt><dd>Fastest-growing: a region's share of recent arrivals over its share of the starting map. Busiest: the arrivals themselves. Brightest is highest.</dd>
+      <dt>Timeline</dt><dd>Items per stretch of time; orange is the share placed badly (misplaced); green ticks are re-layouts. Click ahead to run to a time, drag back to rewind.</dd>
+      <dt>Region history</dt><dd>One band per region, height = its items; forks are splits and merges at re-layouts. Hover to magnify, click a band to pick that region.</dd>
+      <dt>Data loaded</dt><dd id="r-capture">—</dd>
+      <dt>Starting map</dt><dd id="r-base">—</dd>
+      <dt>Meaning model</dt><dd id="r-encoder">—</dd>
       <dt>Live source</dt><dd id="r-live">—</dd>
       <dt>Live feed</dt><dd id="r-livestats">—</dd>
-      <dt>History</dt><dd id="r-history">—</dd>
       <dt>Filter</dt><dd id="r-filter">—</dd>
       <dt>GPU</dt><dd id="r-gpu">—</dd>
-      <dt>Heat</dt><dd>Growth: a region's share of the arrivals in the heat window over its share of the base map. Volume: the arrivals themselves. Brightest is highest.</dd>
-      <dt>Timeline</dt><dd>Posts per bin; orange is the share stranded at placement; green ticks are rebuilds. Click ahead to run to a time, drag back to rewind.</dd>
-      <dt>Lineage</dt><dd>One band per region identity, height = living posts; forks are splits and merges at rebuilds. Hover to magnify, click a band to focus it.</dd>
-      <dt>Method</dt><dd>Every item is turned into a vector of numbers that captures its meaning (an embedding; for text, MiniLM with 384 numbers), so similar items get similar vectors. The starting map is a UMAP layout of those vectors, fitted on this GPU: similar items sit together. Each new item is then placed beside its nearest neighbours on the map, and the map is quietly re-laid out every so often so that it keeps fitting what has arrived (the project's names for these steps: Batched RevAdopt and NodeGardener). Chips name a region by its most distinctive words; +N counts what arrived since Play. Click a chip for the region, a dot for the item.</dd>
     </dl>
-  </details>
+  </div>
 </aside>
 <footer><div id="fitbar" hidden><span id="fitbar-text"></span><button id="fitbar-go" class="primary">Fit and play from here</button><button id="fitbar-no">Cancel</button></div><canvas id="timeline"></canvas><canvas id="lineage" hidden></canvas></footer>
 <script type="module" src="./main.js"></script>
