@@ -1,4 +1,4 @@
-# UMAP Realtime
+# UMAP Instant
 
 A UMAP map that grows as data arrives, in the browser on WebGPU. New items (Bluesky posts, Wikipedia edits, Nostr notes,
 Hacker News items) are embedded in the browser and placed beside their nearest neighbours on the existing map as they
