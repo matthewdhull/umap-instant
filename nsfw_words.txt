@@ -1,0 +1,562 @@
+# NSFW words hidden from region and topic names when the "hide NSFW words" setting is on (the default).
+# Matching happens on tokens of the base posts: a listed word never names a chip, and a two-word phrase that contains one
+# is dropped too. Posts themselves are not filtered, only the names. Lines starting with # are comments; a line starting
+# with * is a substring rule (every word containing the fragment is hidden); everything else is a whole word or phrase.
+#
+# Section 1 is the LDNOOBW list, "List of Dirty, Naughty, Obscene, and Otherwise Bad Words", English, fetched 2026-10-15 from
+# https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words (Creative Commons Attribution 4.0,
+# Shutterstock), used unchanged. Section 2 adds terms the public list misses on Bluesky (event hashtags, platform names,
+# community coinages). Edit freely; the page re-reads the file on load.
+# --- section 1: LDNOOBW en
+2g1c
+2 girls 1 cup
+acrotomophilia
+alabama hot pocket
+alaskan pipeline
+anal
+anilingus
+anus
+apeshit
+arsehole
+ass
+asshole
+assmunch
+auto erotic
+autoerotic
+babeland
+baby batter
+baby juice
+ball gag
+ball gravy
+ball kicking
+ball licking
+ball sack
+ball sucking
+bangbros
+bangbus
+bareback
+barely legal
+barenaked
+bastard
+bastardo
+bastinado
+bbw
+bdsm
+beaner
+beaners
+beaver cleaver
+beaver lips
+beastiality
+bestiality
+big black
+big breasts
+big knockers
+big tits
+bimbos
+birdlock
+bitch
+bitches
+black cock
+blonde action
+blonde on blonde action
+blowjob
+blow job
+blow your load
+blue waffle
+blumpkin
+bollocks
+bondage
+boner
+boob
+boobs
+booty call
+brown showers
+brunette action
+bukkake
+bulldyke
+bullet vibe
+bullshit
+bung hole
+bunghole
+busty
+butt
+buttcheeks
+butthole
+camel toe
+camgirl
+camslut
+camwhore
+carpet muncher
+carpetmuncher
+chocolate rosebuds
+cialis
+circlejerk
+cleveland steamer
+clit
+clitoris
+clover clamps
+clusterfuck
+cock
+cocks
+coprolagnia
+coprophilia
+cornhole
+coon
+coons
+creampie
+cum
+cumming
+cumshot
+cumshots
+cunnilingus
+cunt
+darkie
+date rape
+daterape
+deep throat
+deepthroat
+dendrophilia
+dick
+dildo
+dingleberry
+dingleberries
+dirty pillows
+dirty sanchez
+doggie style
+doggiestyle
+doggy style
+doggystyle
+dog style
+dolcett
+domination
+dominatrix
+dommes
+donkey punch
+double dong
+double penetration
+dp action
+dry hump
+dvda
+eat my ass
+ecchi
+ejaculation
+erotic
+erotism
+escort
+eunuch
+fag
+faggot
+fecal
+felch
+fellatio
+feltch
+female squirting
+femdom
+figging
+fingerbang
+fingering
+fisting
+foot fetish
+footjob
+frotting
+fuck
+fuck buttons
+fuckin
+fucking
+fucktards
+fudge packer
+fudgepacker
+futanari
+gangbang
+gang bang
+gay sex
+genitals
+giant cock
+girl on
+girl on top
+girls gone wild
+goatcx
+goatse
+god damn
+gokkun
+golden shower
+goodpoop
+goo girl
+goregasm
+grope
+group sex
+g-spot
+guro
+hand job
+handjob
+hard core
+hardcore
+hentai
+homoerotic
+honkey
+hooker
+horny
+hot carl
+hot chick
+how to kill
+how to murder
+huge fat
+humping
+incest
+intercourse
+jack off
+jail bait
+jailbait
+jelly donut
+jerk off
+jigaboo
+jiggaboo
+jiggerboo
+jizz
+juggs
+kike
+kinbaku
+kinkster
+kinky
+knobbing
+leather restraint
+leather straight jacket
+lemon party
+livesex
+lolita
+lovemaking
+make me come
+male squirting
+masturbate
+masturbating
+masturbation
+menage a trois
+milf
+missionary position
+mong
+motherfucker
+mound of venus
+mr hands
+muff diver
+muffdiving
+nambla
+nawashi
+negro
+neonazi
+nigga
+nigger
+nig nog
+nimphomania
+nipple
+nipples
+nsfw
+nsfw images
+nude
+nudity
+nutten
+nympho
+nymphomania
+octopussy
+omorashi
+one cup two girls
+one guy one jar
+orgasm
+orgy
+paedophile
+paki
+panties
+panty
+pedobear
+pedophile
+pegging
+penis
+phone sex
+piece of shit
+pikey
+pissing
+piss pig
+pisspig
+playboy
+pleasure chest
+pole smoker
+ponyplay
+poof
+poon
+poontang
+punany
+poop chute
+poopchute
+porn
+porno
+pornography
+prince albert piercing
+pthc
+pubes
+pussy
+queaf
+queef
+quim
+raghead
+raging boner
+rape
+raping
+rapist
+rectum
+reverse cowgirl
+rimjob
+rimming
+rosy palm
+rosy palm and her 5 sisters
+rusty trombone
+sadism
+santorum
+scat
+schlong
+scissoring
+semen
+sex
+sexcam
+sexo
+sexy
+sexual
+sexually
+sexuality
+shaved beaver
+shaved pussy
+shemale
+shibari
+shit
+shitblimp
+shitty
+shota
+shrimping
+skeet
+slanteye
+slut
+s&m
+smut
+snatch
+snowballing
+sodomize
+sodomy
+spastic
+spic
+splooge
+splooge moose
+spooge
+spread legs
+spunk
+strap on
+strapon
+strappado
+strip club
+style doggy
+suck
+sucks
+suicide girls
+sultry women
+swastika
+swinger
+tainted love
+taste my
+tea bagging
+threesome
+throating
+thumbzilla
+tied up
+tight white
+tit
+tits
+titties
+titty
+tongue in a
+topless
+tosser
+towelhead
+tranny
+tribadism
+tub girl
+tubgirl
+tushy
+twat
+twink
+twinkie
+two girls one cup
+undressing
+upskirt
+urethra play
+urophilia
+vagina
+venus mound
+viagra
+vibrator
+violet wand
+vorarephilia
+voyeur
+voyeurweb
+voyuer
+vulva
+wank
+wetback
+wet dream
+white power
+whore
+worldsex
+wrapping men
+wrinkled starfish
+xx
+xxx
+yaoi
+yellow showers
+yiffy
+zoophilia
+🖕
+# --- additions for this lane: platform-specific and creative terms the public list misses (one per line)
+kinktober
+nsfwsky
+locktober
+cagewatchr
+chastity
+lewd
+lewds
+horny
+nude
+nudes
+nudity
+naked
+tits
+titties
+boobs
+thirst
+thirsty
+thirsttrap
+sexy
+slut
+sluts
+whore
+whores
+onlyfans
+fansly
+fanvue
+loyalfans
+manyvids
+clips4sale
+findom
+futa
+futanari
+yiff
+ahegao
+hentai
+ecchi
+oppai
+bara
+r18
+r-18
+18+
+degenerate
+goon
+gooning
+gooner
+edging
+cumslut
+breeding
+bimbo
+sissy
+femboy
+femdom
+dominatrix
+spank
+spanking
+bondage
+shibari
+pegging
+fetish
+fetishes
+fetishsky
+kink
+kinky
+kinks
+kinksky
+nsfwart
+nsfwartist
+nsfwbluesky
+lewdsky
+pornsky
+sexwork
+sexworker
+sexworkers
+escort
+escorts
+camgirl
+camgirls
+camboy
+cammodel
+stripper
+strippers
+hookup
+hookups
+orgy
+threesome
+cuck
+cuckold
+hotwife
+milf
+milfs
+dilf
+gilf
+twink
+twinks
+otter
+bussy
+panties
+lingerie
+underwear
+bulge
+cleavage
+# --- compound coinages seen in Bluesky region names on 2026-10-15
+hugecock
+bigcock
+bigdick
+hugedick
+fatcock
+cocks
+dicks
+dickpic
+dickpics
+cockpic
+nudepic
+nudepics
+titpic
+boobies
+booty
+thicc
+# --- substring rules: any word containing the fragment is hidden (keep these to fragments that are never innocent)
+*nsfw
+*porn
+*kink
+*fetish
+*lewd
+*hentai
+*onlyfans
+*horny
+*sexwork
+*cumshot
+*blowjob
+*handjob
+*deepthroat
+*gangbang
+*bukkake
+*creampie
+*masturbat
+*erotic
+*xxx
+*hugecock
+*bigcock
+*bigdick
+*hugedick
+*dickpic
+*cockpic
+*nudepic
+*sexy
+*slut
+*whore

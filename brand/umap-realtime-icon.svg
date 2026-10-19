@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="512" height="512" role="img" aria-label="UMAP Realtime">
+  <title>UMAP Realtime</title>
+  <!-- the small-size mark (16-48 px): a point that has just landed (amber, one ring) and the three neighbours it was placed by -->
+  <rect width="32" height="32" rx="7" fill="#0b0e13"/>
+  <g stroke="#e0a94a" stroke-width="1.6" stroke-linecap="round" opacity="0.85"><path d="M13 18 L23.5 9.5"/><path d="M13 18 L25 20.5"/><path d="M13 18 L17.5 26.5"/></g>
+  <g fill="#6f9ad6"><circle cx="23.5" cy="9.5" r="3"/><circle cx="25" cy="20.5" r="2.6"/><circle cx="17.5" cy="26.5" r="2.4"/></g>
+  <circle cx="13" cy="18" r="7.2" fill="none" stroke="#e0a94a" stroke-width="1.6" opacity="0.45"/>
+  <circle cx="13" cy="18" r="4" fill="#e0a94a"/>
+</svg>

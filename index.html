@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UMAP Realtime</title>
+<link rel="icon" type="image/svg+xml" href="brand/umap-realtime-icon.svg">
+<script>/* the map picture the previous page left (handoff.js saveSnapshot), shown until this page draws its own */
+try { const s = JSON.parse(sessionStorage.getItem('jet.snap') || 'null'); sessionStorage.removeItem('jet.snap');
+  const here = /tune\.html$/.test(location.pathname) ? 'tune' : 'live';
+  if (s && s.to === here && Date.now() - s.t < 30000) { const i = new Image(); i.id = 'snapOverlay'; i.alt = ''; i.src = s.url;
+    i.style.cssText = `position:fixed;left:${s.rect.left}px;top:${s.rect.top}px;width:${s.rect.width}px;height:${s.rect.height}px;z-index:50;pointer-events:none;transition:opacity .3s`;
+    document.documentElement.appendChild(i); window.__snapShownAt = performance.now(); setTimeout(() => i.remove(), 30000); } } catch (e) {}
+</script>
+<style>@view-transition { navigation: auto; }</style>
+
+<style>
+  :root { --bg:#0b0e13; --panel:#121823; --line:#243040; --ink:#e6edf6; --mut:#9fb0c6; --dim:#8592a8; --amber:#e0a94a; --err:#ff7b72; --live:#59c3a0; }
+  * { box-sizing:border-box } [hidden] { display:none !important } html,body { margin:0; height:100%; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif }
+  body { display:grid; grid-template-rows:auto 1fr 128px; grid-template-columns:1fr 400px; grid-template-areas:"head head" "stage panel" "time time"; height:100vh }
+  @media (max-width:1200px) { body { grid-template-columns:1fr min(400px, 36vw) } }
+  @media (max-width:900px) { html, body { height:auto } body { grid-template-rows:auto 62vh 128px auto; grid-template-columns:1fr; grid-template-areas:"head" "stage" "time" "panel"; height:auto; min-height:100vh } aside { border-left:0; border-top:1px solid var(--line); overflow:visible } #mapcaption { max-width:calc(100% - 28px) } header { flex-wrap:wrap; row-gap:6px } }
+  header { grid-area:head; display:flex; align-items:center; gap:18px; padding:8px 16px; border-bottom:1px solid var(--line) }
+  header h1 { font-size:15px; margin:0; font-weight:600; display:flex; align-items:center; gap:14px; min-width:0 } 
+  /* what the map shows: a quiet caption on the map's top left, not part of the brand */
+  #mapcaption { position:absolute; top:10px; left:14px; z-index:3; max-width:min(62%, 680px); display:flex; flex-direction:column; gap:2px; pointer-events:none; text-shadow:0 1px 3px var(--bg) }
+  #mapcaption #capname { font-size:13px; font-weight:600; color:var(--ink) } #mapcaption #h1sub { font-size:12px; color:var(--mut); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+  .brand { display:inline-flex; align-items:center; gap:9px; flex:none; color:var(--ink); text-decoration:none } .brand svg { height:30px; width:auto; display:block }
+  .brand .rt { font:600 12px/1 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; letter-spacing:.14em; color:var(--mut) } #status { position:absolute; right:14px; bottom:12px; z-index:4; max-width:min(56%, 620px); margin:0; padding:5px 10px; font-size:12px; line-height:1.4; color:var(--mut); background:rgba(11,14,19,.8); border:1px solid var(--line); border-radius:6px; pointer-events:none; transition:opacity .6s } #status.quiet { opacity:0 } #status.error { color:var(--err); border-color:color-mix(in srgb, var(--err) 45%, var(--line)) } header .hspace { flex:1 }
+  #livebadge:empty { display:none !important } #livebadge { display:none; color:var(--live); font-weight:600; font-size:12px; letter-spacing:.08em } #livebadge.on { display:inline } #livebadge::before { content:"●"; margin-right:6px; animation:blink 1.2s infinite } #livebadge.paused { color:var(--mut) } #livebadge.paused::before { animation:none } @keyframes blink { 50% { opacity:.2 } }
+  .stage { grid-area:stage; position:relative; min-height:0; overflow:hidden } canvas#map { width:100%; height:100%; display:block; cursor:grab; touch-action:none } #gizmo3d { position:absolute; left:12px; bottom:52px; z-index:4; display:flex; flex-direction:column; align-items:center; gap:4px } #gizmo3d button { font-size:12px; padding:2px 8px } canvas#map3d { position:absolute; inset:0; width:100%; height:100%; display:block; cursor:grab; touch-action:none; z-index:3 } a.switch + a.switch { margin-left:-10px }
+  .legend { position:absolute; left:12px; bottom:12px; background:rgba(11,14,19,.78); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:12px; max-width:420px }
+  .legend summary { cursor:pointer; color:var(--mut); font-size:12px } .legend[open] summary { margin-bottom:6px }
+  #legend { display:flex; flex-direction:column; gap:3px } #legend > div { display:flex; align-items:center; gap:8px; white-space:nowrap } .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; flex:none } .legend small { color:var(--dim) }
+  aside { grid-area:panel; background:var(--panel); border-left:1px solid var(--line); overflow:auto; padding:12px 14px 20px; display:flex; flex-direction:column; gap:14px }
+  section h2, details.controls > summary { font-size:13px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink); margin:0 0 8px; font-weight:600 }
+  .controls { display:flex; flex-direction:column; gap:12px } .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap }
+  /* one control per line: label column, control, value */
+  .ctl { display:grid; grid-template-columns:118px minmax(0,1fr) auto; align-items:center; column-gap:10px; min-height:28px }
+  .ctl.auto-set > .lbl { color:var(--dim) } .ctl.auto-set > .val > span:first-child { color:var(--dim) } input[type=range]:disabled { opacity:.4 }
+  /* per-control automatic setting: a small pill in the value column; on = filled, off = outline; the control it governs is disabled while on */
+  .pill { font:600 10px/1.5 system-ui,sans-serif; letter-spacing:.08em; text-transform:uppercase; border:1px solid var(--line); color:var(--dim); background:transparent; border-radius:999px; padding:0 7px; margin-left:8px; cursor:pointer; vertical-align:middle } .pill.on { background:rgba(89,195,160,.14); border-color:rgba(89,195,160,.65); color:var(--live) } .pill:hover { border-color:#5a6f8f } .pill.on:hover { border-color:var(--live) }
+  .ctl > .lbl { color:var(--mut); font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis } .ctl > .val { color:var(--ink); font-size:12.5px; font-variant-numeric:tabular-nums; white-space:nowrap; min-width:3.5em; text-align:right }
+  .ctl > .val.unit { color:var(--mut) } .ctl > input[type=range] { width:100%; margin:0 } .ctl > select { width:100%; min-width:0 } .ctl > .two { display:flex; gap:8px; align-items:center; min-width:0 } .ctl > .two > * { flex:1; min-width:0 } .ctl label.chk { display:flex; align-items:center; gap:6px; color:var(--ink); font-size:13px; white-space:nowrap } .ctl label.chk input { margin:0 }
+  .ctl.check { grid-template-columns:118px 1fr } .ctl.check label { display:flex; align-items:center; gap:8px; color:var(--ink); font-size:13px } .ctl.check input { margin:0 }
+  .sub { grid-column:2 / -1 } .ctl.wide { grid-template-columns:118px 1fr } .ctl > .lbl.indent { padding-left:14px }
+  a.switch { background:#1b2433; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:4px 11px; font-size:13px; text-decoration:none; white-space:nowrap } a.switch:hover { border-color:#3b4b63 } a.switch[aria-busy=true] { opacity:.6; pointer-events:none }
+  button { background:#1b2433; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:5px 11px; cursor:pointer; font:inherit; font-size:13px } button:hover { border-color:#3b4b63 } button.primary { background:#2b3a1f; border-color:#4b6a2a } button.live { background:#173a31; border-color:#2f7a63 } button:disabled { opacity:.5; cursor:default }
+  .srcpick { position:relative; min-width:0; display:block } .srcpick select { display:none }
+  #srcBtn { width:100%; display:flex; align-items:center; gap:7px; text-align:left; background:#1b2433; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:3px 8px; font:inherit; font-size:13px; line-height:1.3; cursor:pointer; min-width:0 } #srcBtn:hover { border-color:#3b4b63 }
+  #srcBtn::after { content:""; margin-left:auto; border:4px solid transparent; border-top-color:var(--mut); border-bottom:0; flex:none } #srcBtn .nm { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0 }
+  #srcList { position:absolute; z-index:40; left:0; right:0; top:calc(100% + 4px); background:#151c28; border:1px solid var(--line); border-radius:8px; padding:4px; box-shadow:0 8px 24px rgba(0,0,0,.45); max-height:60vh; overflow:auto }
+  #srcList .grp { color:var(--dim); font-size:11px; letter-spacing:.06em; text-transform:uppercase; padding:6px 8px 3px } #srcList .opt { display:flex; align-items:center; gap:7px; padding:4px 8px; border-radius:5px; cursor:pointer; font-size:13px; color:var(--ink) }
+  #srcList .opt:hover, #srcList .opt.focus { background:#22304a } #srcList .opt[aria-selected=true] { color:var(--amber) } .srcpick .ic { width:14px; height:14px; flex:none }
+  .ant { color:var(--live) } .ant .ping { transform-box:view-box; transform-origin:7px 5px; animation:ping 1.8s ease-out infinite } @keyframes ping { 0% { transform:scale(.6); opacity:.9 } 80%,100% { transform:scale(3.2); opacity:0 } }
+  .dset { color:var(--dim) } @media (prefers-reduced-motion: reduce) { .ant .ping { animation:none; opacity:.5 } }
+  #inspect-post img.thumb { display:block; width:160px; max-width:100%; border-radius:4px; margin-bottom:6px }
+  label { color:var(--mut); font-size:13px } select,input[type=range] { accent-color:var(--amber) } select,input[type=text],input[type=number] { background:#1b2433; color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:3px 8px; line-height:1.3; font:inherit; font-size:13px; margin:0 } input[type=number] { width:7.5em }
+  dl { margin:0; display:grid; grid-template-columns:118px 1fr; column-gap:10px; row-gap:5px } dt { color:var(--dim); font-size:12px; padding-top:1px } dd { margin:0; font-size:12.5px; font-variant-numeric:tabular-nums; word-break:break-word }
+  .notes { color:var(--mut); font-size:12.5px } .notes p { margin:0 0 8px } .hint { color:var(--dim); font-size:12px; line-height:1.4 } .strong { font-weight:600 }
+  details.controls summary { cursor:pointer; list-style:none } details.controls summary::before { content:"▸ "; } details.controls[open] summary::before { content:"▾ "; } .sw { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle }
+  .post { background:#0f141c; border:1px solid var(--line); border-radius:6px; padding:8px 10px; margin:6px 0; font-size:13px; white-space:pre-wrap; word-break:break-word } .post small { color:var(--dim); display:block; margin-top:4px; white-space:normal }
+  .nbr { font-size:12px; color:var(--mut); border-left:2px solid #2a3340; padding-left:8px; margin:4px 0; white-space:pre-wrap; word-break:break-word } .nbr b { color:var(--ink); font-weight:500 }
+  #ticker { position:absolute; inset:0; pointer-events:none; overflow:hidden } #ticker .tick { position:absolute; left:50%; top:18px; transform:translateX(-50%); display:flex; flex-direction:column; align-items:center; gap:8px; max-width:min(720px, 92%) }
+  #ticker .src { display:flex; flex-wrap:wrap; justify-content:center; gap:3px; transform-origin:50% 100% } #ticker .tok { font:12px/1.5 ui-monospace,Menlo,monospace; color:var(--ink); background:#1b2433; border:1px solid var(--line); border-radius:4px; padding:0 5px }
+  #ticker .tok.sub { color:var(--mut); border-style:dashed } #ticker .pic { width:72px; height:72px; object-fit:cover; border-radius:4px; border:1px solid var(--line) } #ticker .strip { image-rendering:pixelated; border:1px solid var(--line) }
+  #ticker .ping { position:absolute; width:10px; height:10px; border-radius:50%; border:1.5px solid var(--amber) }
+  #preview { position:absolute; inset:0; width:100%; height:100%; pointer-events:none } #chips { position:absolute; inset:0; pointer-events:none } #chips svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none } #chips line { stroke:rgba(255,255,255,.35); stroke-width:1 } #chips line.sel { stroke:#ffd966; stroke-width:1.5 } .chip { position:absolute; transform:translate(-50%,-50%); display:inline-flex; align-items:center; justify-content:center; gap:6px; box-sizing:border-box; overflow:hidden; padding:2px 9px; border:1px solid rgba(255,255,255,.18); border-radius:999px; background:rgba(11,14,19,.82); color:#e6edf6; font-size:11px; font-weight:600; white-space:nowrap; pointer-events:auto; cursor:default } .chip i { width:8px; height:8px; border-radius:50%; display:inline-block } .chip small { font-size:11px; font-weight:500; color:#9fb0c6; font-variant-numeric:tabular-nums } .chip small b { color:#ffd966; font-weight:600 } .chip:hover { border-color:#ffd966 } .chip.sel { border-color:#ffd966; background:rgba(60,48,10,.92); box-shadow:0 0 0 2px rgba(255,217,102,.25) } .chip .w { display:inline-block; transition:opacity .3s, transform .4s cubic-bezier(.34,1.25,.64,1) } .chip .w.out, .chip .w.in { opacity:0 } .chip .w + .w::before { content:'\00a0·\00a0'; color:#9fb0c6; font-weight:500 } .chip.bye { opacity:0; transition:opacity .4s }
+  .strip { display:grid; grid-template-columns:auto auto auto 1fr; column-gap:10px; font-size:12.5px; font-variant-numeric:tabular-nums; white-space:nowrap; color:var(--mut); border-top:1px solid var(--line); padding-top:7px; margin-top:2px } .strip > span { min-width:0; overflow:hidden } .strip b { color:var(--ink); font-weight:600 } .strip .arr { color:#ffd966 }
+  details.controls > summary { margin:0 } details.controls[open] > summary { margin-bottom:12px } .ctl > .val.left { text-align:left; min-width:0; white-space:normal }
+  #region-spark { width:100%; height:44px; display:block; margin:2px 0 }
+  .pals { display:flex; gap:5px; min-width:0 } .pals button { flex:1; min-width:0; height:14px; padding:0; border-radius:3px; border:1px solid transparent } .pals button.on { border-color:var(--ink); box-shadow:0 0 0 1px var(--bg) inset }
+  .legend { z-index:2 } #loupe { z-index:5; position:absolute; bottom:6px; pointer-events:none; border:1px solid var(--line); border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.5) }
+  body.notime { grid-template-rows:auto 1fr 0 } body.notime footer { display:none }
+  footer { grid-area:time; border-top:1px solid var(--line); padding:6px 12px 4px; position:relative }
+  #fitbar { position:absolute; left:50%; top:-46px; transform:translateX(-50%); display:flex; gap:8px; align-items:center; padding:6px 8px 6px 12px; background:var(--panel, #12161d); border:1px solid var(--line); border-radius:8px; box-shadow:0 4px 18px rgba(0,0,0,.35); white-space:nowrap; z-index:5 }
+  #fitbar[hidden] { display:none } canvas#timeline, canvas#lineage { width:100%; height:114px; display:block; cursor:pointer; touch-action:none }
+  button.on { border-color:var(--amber); color:var(--amber) } #r-view { font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+</style>
+</head>
+<body>
+<header><h1><span class="brand" role="img" aria-label="UMAP Realtime"><svg viewBox="0 0 240 64" aria-hidden="true"><g fill="#6f9ad6"><circle cx="38.5" cy="15.5" r="2.3"/><circle cx="44" cy="12.5" r="2"/><circle cx="47.5" cy="18" r="2.5"/><circle cx="42" cy="21" r="2"/><circle cx="50.5" cy="23.5" r="1.6"/><circle cx="37" cy="9.5" r="1.4"/></g><g fill="#59c3a0"><circle cx="44" cy="40" r="2.5"/><circle cx="50" cy="37" r="2.1"/><circle cx="52.5" cy="43.5" r="2.3"/><circle cx="46.5" cy="46.5" r="1.9"/><circle cx="55.5" cy="49" r="1.5"/><circle cx="39.5" cy="45" r="1.4"/></g><g fill="#b48ac9"><circle cx="20" cy="52.5" r="2.2"/><circle cx="26" cy="55.5" r="1.9"/><circle cx="27.5" cy="49" r="1.6"/><circle cx="15.5" cy="57" r="1.3"/></g><g stroke="#e0a94a" stroke-width="0.9" stroke-linecap="round" opacity="0.75" fill="none"><path d="M33.5 26.5 L38.5 15.5"/><path d="M33.5 26.5 L42 21"/><path d="M33.5 26.5 L44 40"/></g><g fill="#e0a94a"><circle cx="5" cy="52" r="1" opacity="0.3"/><circle cx="10" cy="45.5" r="1.25" opacity="0.45"/><circle cx="15.5" cy="39.5" r="1.5" opacity="0.6"/><circle cx="21.5" cy="34.5" r="1.8" opacity="0.75"/><circle cx="27.5" cy="30" r="2.1" opacity="0.9"/></g><circle cx="33.5" cy="26.5" r="6.2" fill="none" stroke="#e0a94a" stroke-width="1.1" opacity="0.55"/><circle cx="33.5" cy="26.5" r="10" fill="none" stroke="#e0a94a" stroke-width="0.8" opacity="0.25"/><circle cx="33.5" cy="26.5" r="3.2" fill="#e0a94a"/><circle cx="32.4" cy="25.4" r="1" fill="#fff4dc"/><g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" transform="translate(74 11.5)"><path d="M4 4 V24 A13 13 0 0 0 30 24 V4"/><path d="M44 41 V4 L60 26 L76 4 V41"/><path d="M90 41 L106 4 L122 41 M96 28 H116"/><path d="M136 41 V4 H150 A10.5 10.5 0 0 1 150 25 H136"/></g></svg><span class="rt">REALTIME</span></span></h1><span id="livebadge">LIVE</span><span class="hspace"></span><a id="view3d" class="switch" href="#">3D</a><a id="tunerLink" class="switch" href="./tune.html">Base map tuner</a></header>
+<div class="stage"><p id="status" role="status">Loading…</p><div id="mapcaption"><b id="capname"></b><span id="h1sub"></span></div><canvas id="map"></canvas><canvas id="map3d" hidden></canvas><div id="gizmo3d" hidden></div><canvas id="preview" hidden></canvas><div id="ticker"></div><div id="chips"></div><canvas id="loupe" hidden></canvas><details class="legend" id="legendBox"><summary>Legend</summary><div id="legend"></div></details></div>
+<aside>
+  <section id="tune" class="controls" hidden><h2>Base map</h2>
+    <div class="ctl"><span class="lbl">On change</span><select id="tu-mode"><option value="move">move from here</option><option value="refit">refit from the start</option></select><span class="val"></span></div>
+    <div class="ctl" id="tu-restartRow"><span class="lbl indent">restart</span><input id="tu-restart" type="range" min="0.02" max="1" step="0.02"><span class="val" id="tu-restartv"></span></div>
+    <div class="ctl"><span class="lbl">Preset</span><select id="tu-preset"><option value="page">live map's base fit</option><option value="umap">umap-learn defaults</option><option value="custom">custom</option></select><span class="val"></span></div>
+    <div class="ctl"><span class="lbl">Optimizer · start</span><span class="two"><select id="tu-optimizer"><option value="sgd">SGD</option><option value="adam">Adam</option></select><select id="tu-init"><option value="spectral">Spectral</option><option value="pca">PCA</option><option value="random">Random</option></select></span><span class="val"></span></div>
+    <div class="ctl"><span class="lbl">Neighbours (k)</span><input id="tu-k" type="range" min="2" max="64" step="1"><span class="val" id="tu-kv"></span></div>
+    <div class="ctl"><span class="lbl">Learning rate</span><input id="tu-lr" type="range" min="-3" max="0.6" step="0.01"><span class="val" id="tu-lrv"></span></div>
+    <div class="ctl"><span class="lbl"><label class="chk"><input id="tu-anneal" type="checkbox"> Anneal over</label></span><input id="tu-epochs" type="range" min="50" max="3000" step="50"><span class="val" id="tu-epochsv"></span></div>
+    <div class="ctl"><span class="lbl">Repulsion</span><input id="tu-gamma" type="range" min="0" max="10" step="0.1"><span class="val" id="tu-gammav"></span></div>
+    <div class="ctl"><span class="lbl">Negative samples</span><input id="tu-negRate" type="range" min="0" max="30" step="0.5"><span class="val" id="tu-negRatev"></span></div>
+    <div class="ctl"><span class="lbl">Min distance</span><input id="tu-minDist" type="range" min="0" max="1" step="0.01"><span class="val" id="tu-minDistv"></span></div>
+    <div class="ctl"><span class="lbl">Spread</span><input id="tu-spread" type="range" min="0.2" max="3" step="0.05"><span class="val" id="tu-spreadv"></span></div>
+    <div class="row"><button id="tu-undo">Undo tuning</button><span id="tu-state" class="hint"></span><span id="tu-ab" class="hint"></span></div>
+  </section>
+  <section class="controls" id="g-top">
+    <div class="row"><button id="play" class="primary">Play</button><button id="fullmap" hidden>Full map</button><button id="golive" class="live">Go live</button><button id="rebuildNow">Rebuild now</button><span id="r-next" class="hint"></span></div>
+    <div class="row"><button id="lineage-btn">Lineage</button><button id="replay30">Replay the hour in 30 s</button></div>
+    <div class="ctl wide"><span class="lbl">Rewind</span><span id="r-view" class="val left">off</span></div>
+    <div class="ctl"><span class="lbl">Speed</span><input id="speed" type="range" min="1" max="120" value="10"><span class="val"><span id="speedv">10</span>× real time</span></div>
+    <div class="strip"><span id="s-time">—</span><span id="s-map">—</span><span id="s-arr">—</span><span id="s-ms">—</span></div>
+  </section>
+  <section id="region" class="controls" hidden><h2>Region</h2>
+    <div id="region-title" class="strong">—</div>
+    <div class="ctl wide"><span class="lbl">Posts</span><span id="region-count" class="val left">—</span></div>
+    <div class="ctl wide"><span class="lbl">Arriving</span><span id="region-rate" class="val left">—</span></div>
+    <canvas id="region-spark" width="372" height="44"></canvas>
+    <div id="region-hist" class="hint"></div>
+    <div id="region-rep" class="post"></div>
+    <div class="row"><button id="region-clear">Clear</button></div>
+  </section>
+  <section id="inspect" class="controls" hidden><h2 id="inspectTitle">Inspected post</h2>
+    <div id="inspect-title" class="strong">—</div>
+    <div id="inspect-post" class="post"></div>
+    <div id="inspect-body" class="hint"></div>
+    <div class="row"><label><input type="radio" name="im" id="im-both" value="both" checked> both</label><label><input type="radio" name="im" id="im-neighbours" value="neighbours"> neighbours only</label><label><input type="radio" name="im" id="im-adopters" value="adopters"> adopters only</label><button id="inspect-clear">Clear</button></div>
+    <div id="inspect-nbrs"></div>
+  </section>
+  <details class="controls" id="g-look" data-remember><summary>Look</summary>
+    <div class="ctl wide"><span class="lbl">Colour by</span><select id="mode"><option value="6" selected>region</option><option value="0">topic cluster</option><option value="1">arrival time</option><option value="2">base map vs streamed</option><option value="5">reply vs original</option><option value="4">latest flush</option><option value="3">local fit score</option></select></div>
+    <div class="ctl wide"><span class="lbl">Heat</span><select id="heat"><option value="off" selected>off</option><option value="growth">growth · vs base share</option><option value="volume">volume · arrival rate</option></select></div>
+    <div class="ctl auto-set" id="ctl-heatwin"><span class="lbl indent">window</span><input id="heatWin" type="range" min="60" max="1800" step="30" value="60" disabled><span class="val"><span id="heatWinv">60</span> s<button class="pill on" data-auto="heatWin">auto</button></span></div>
+    <div class="ctl"><span class="lbl indent">palette</span><span class="pals" id="heatPals"></span><span class="val" id="heatPalv">ember</span></div>
+    <div class="ctl"><span class="lbl">Point size</span><input id="psize" type="range" min="1" max="6" step="0.2" value="2.0"><span class="val"></span></div>
+    <div class="ctl"><span class="lbl">Settled dimming</span><input id="dim" type="range" min="0.1" max="1" step="0.05" value="0.35"><span class="val"></span></div>
+    <div class="ctl auto-set" id="ctl-recent"><span class="lbl">Emphasised for</span><input id="recent" type="range" min="5" max="600" step="5" value="15" disabled><span class="val"><span id="recentv">15</span> s<button class="pill on" data-auto="recent">auto</button></span></div>
+    <div class="ctl"><span class="lbl">Emphasis</span><input id="boost" type="range" min="0" max="3" step="0.1" value="1.5"><span class="val"><span id="boostv">1.5</span>×</span></div>
+    <div class="ctl check"><span class="lbl">Tints</span><label><input type="checkbox" id="regionsOn" checked> soft regions</label></div>
+    <div class="ctl"><span class="lbl indent">strength</span><input id="regionAlpha" type="range" min="0" max="1" step="0.05" value="0.7"><span class="val"></span></div>
+    <div class="ctl auto-set" id="ctl-grain"><span class="lbl indent">grain</span><input id="regionSigma" type="range" min="2" max="12" step="1" value="4" disabled><span class="val"><span id="regionSigmav">4</span> px<button class="pill on" data-auto="sigma">auto</button></span></div>
+    <div class="ctl auto-set" id="ctl-soft"><span class="lbl indent">edge softness</span><input id="regionSoft" type="range" min="2" max="14" step="1" value="6" disabled><span class="val"><span id="regionSoftv">6</span> px<button class="pill on" data-auto="soft">auto</button></span></div>
+    <div class="ctl auto-set" id="ctl-tau"><span class="lbl indent">merge saddles</span><input id="regionTau" type="range" min="0.02" max="0.5" step="0.02" value="0.1" disabled><span class="val"><span id="regionTauv">0.1</span> of peak<button class="pill on" data-auto="tau">auto</button></span></div>
+    <div class="ctl wide"><span class="lbl indent">tint colour</span><select id="regionTint"><option value="topic">majority topic cluster</option><option value="pastel">distinct pastel</option></select></div>
+    <div class="ctl check"><span class="lbl">Chips</span><label><input type="checkbox" id="chipsOn" checked> count and <b style="color:#ffd966">+N</b> arrivals</label></div>
+    <div class="ctl"><span class="lbl indent">words</span><span id="chipWords"></span><span class="val"></span></div>
+    <div class="ctl"><span class="lbl">Focus ghosting</span><input id="ghost" type="range" min="0" max="0.3" step="0.01" value="0.05"><span class="val unit">opacity</span></div>
+    <div class="ctl check"><span class="lbl">Growth layer</span><label><input type="checkbox" id="growth"> recent-arrival density</label></div>
+    <div class="ctl"><span class="lbl indent">window</span><input id="gwin" type="range" min="10" max="900" step="10" value="120"><span class="val"><span id="gwinv">120</span> s</span></div>
+    <div class="ctl"><span class="lbl indent">intensity</span><input id="gden" type="range" min="1" max="30" step="0.5" value="6"><span class="val"></span></div>
+  </details>
+  <details class="controls" id="g-method" data-remember><summary>Method</summary>
+    <div class="row"><button id="step">Step one flush</button><button id="reset">Reset to base map</button></div>
+    <div class="ctl"><span class="lbl">Flush every</span><select id="interval"><option value="0.1">0.1 s</option><option value="0.25">0.25 s</option><option value="0.5" selected>0.5 s</option><option value="1">1 s</option><option value="2">2 s</option><option value="5">5 s</option><option value="10">10 s</option><option value="30">30 s</option></select><span class="val unit">of stream time</span></div>
+    <div class="ctl wide"><span class="lbl">Base map</span><select id="base"></select></div>
+    <div class="ctl wide"><span class="lbl">Source</span><span class="srcpick"><select id="livesrc"><optgroup label="Live"><option value="browser">Bluesky posts (Jetstream)</option><option value="wikipedia">Wikipedia edits (EventStreams)</option><option value="nostr">Nostr notes (public relays)</option><option value="hackernews">Hacker News (API)</option><option value="opensky">Aircraft (OpenSky ADS-B)</option></optgroup><optgroup label="Datasets" id="srcDatasets"></optgroup></select><button type="button" id="srcBtn" aria-haspopup="listbox" aria-expanded="false"></button><div id="srcList" role="listbox" hidden></div></span></div>
+    <div class="ctl check"><span class="lbl">Names</span><label><input type="checkbox" id="nsfwOn" checked> hide NSFW words</label></div>
+    <div class="ctl"><span class="lbl">History budget</span><input id="budget" type="number" min="0" step="1000" value="0"><span class="val unit">arrivals · 0 = auto</span></div>
+    <div class="ctl"><span class="lbl">Rebuild</span><span class="two"><label class="chk"><input type="checkbox" id="autoRebuild" checked> every</label><input id="rebuildMin" type="number" min="0.5" step="0.5" value="0.5"></span><span class="val unit">min played</span></div>
+    <div class="ctl"><span class="lbl indent">or after</span><input id="rebuildArrivals" type="number" min="0" step="1" value="0"><span class="val unit">k arrivals · 0 = off</span></div>
+    <div class="ctl"><span class="lbl indent">leash</span><input id="leash" type="range" min="0" max="60" step="1" value="30"><span class="val"><span id="leashv">30</span></span></div>
+    <div class="ctl"><span class="lbl indent">morph</span><input id="morphMs" type="range" min="0" max="6" step="0.5" value="3"><span class="val"><span id="morphv">3</span> s</span></div>
+  </details>
+  <details class="controls" id="g-eval" data-remember><summary>Evaluation</summary>
+    <div class="ctl check"><span class="lbl">Solver path</span><label><input type="checkbox" id="settleOn"> animate start → final</label></div>
+    <div class="ctl"><span class="lbl indent">duration</span><input id="settleMs" type="range" min="0" max="1500" step="50" value="500"><span class="val"><span id="settlev">500</span> ms</span></div>
+    <div class="ctl wide"><span class="lbl">2-D window</span><select id="window"><option value="15">15 nearest on the map</option><option value="30" selected>30 nearest</option><option value="50">50 nearest</option><option value="100">100 nearest</option></select></div>
+    <div class="ctl check"><span class="lbl">Stranded</span><label><input type="checkbox" id="stranded"> ring recent stranded</label></div>
+    <div class="ctl check"><span class="lbl">Threshold</span><label><input type="checkbox" id="thrAuto" checked> base map's 5th percentile</label></div>
+    <div class="ctl"><span class="lbl indent">manual</span><input id="thrKept" type="range" min="1" max="15" value="4" disabled><span class="val unit">kept of 15</span></div>
+    <div id="thrv" class="hint sub">—</div>
+    <div class="row"><button id="scoreBins">Local fit by 10-minute bin</button></div>
+    <div id="r-bins" class="hint"></div>
+    <dl>
+      <dt>Stream time</dt><dd id="r-time">—</dd>
+      <dt>Posts on the map</dt><dd id="r-mapsize">—</dd>
+      <dt>Arrivals placed</dt><dd id="r-arrivals">—</dd>
+      <dt>Local fit</dt><dd id="r-fit">—</dd>
+      <dt>Stranded</dt><dd id="r-stranded">—</dd>
+      <dt>Moved by placement</dt><dd id="r-settle">—</dd>
+      <dt>Adopters</dt><dd id="r-adopters">—</dd>
+      <dt>Impostor ledger</dt><dd id="r-ledger">—</dd>
+      <dt>Last rebuild</dt><dd id="r-rebuild">none yet</dd>
+      <dt>Regions</dt><dd id="r-regions">—</dd>
+      <dt>Iterations</dt><dd id="r-iters">—</dd>
+      <dt>Flush time</dt><dd id="r-ms">—</dd>
+      <dt>Running total</dt><dd id="r-cum">—</dd>
+      <dt>Replay hash</dt><dd id="r-hash">—</dd>
+    </dl>
+  </details>
+  <details class="controls" id="g-about" data-remember><summary>About</summary>
+    <dl>
+      <dt>Capture</dt><dd id="r-capture">—</dd>
+      <dt>Base map</dt><dd id="r-base">—</dd>
+      <dt>Encoder</dt><dd id="r-encoder">—</dd>
+      <dt>Live source</dt><dd id="r-live">—</dd>
+      <dt>Live feed</dt><dd id="r-livestats">—</dd>
+      <dt>History</dt><dd id="r-history">—</dd>
+      <dt>Filter</dt><dd id="r-filter">—</dd>
+      <dt>GPU</dt><dd id="r-gpu">—</dd>
+      <dt>Heat</dt><dd>Growth: a region's share of the arrivals in the heat window over its share of the base map. Volume: the arrivals themselves. Brightest is highest.</dd>
+      <dt>Timeline</dt><dd>Posts per bin; orange is the share stranded at placement; green ticks are rebuilds. Click ahead to run to a time, drag back to rewind.</dd>
+      <dt>Lineage</dt><dd>One band per region identity, height = living posts; forks are splits and merges at rebuilds. Hover to magnify, click a band to focus it.</dd>
+      <dt>Method</dt><dd>Every item is turned into a vector of numbers that captures its meaning (an embedding; for text, MiniLM with 384 numbers), so similar items get similar vectors. The starting map is a UMAP layout of those vectors, fitted on this GPU: similar items sit together. Each new item is then placed beside its nearest neighbours on the map, and the map is quietly re-laid out every so often so that it keeps fitting what has arrived (the project's names for these steps: Batched RevAdopt and NodeGardener). Chips name a region by its most distinctive words; +N counts what arrived since Play. Click a chip for the region, a dot for the item.</dd>
+    </dl>
+  </details>
+</aside>
+<footer><div id="fitbar" hidden><span id="fitbar-text"></span><button id="fitbar-go" class="primary">Fit and play from here</button><button id="fitbar-no">Cancel</button></div><canvas id="timeline"></canvas><canvas id="lineage" hidden></canvas></footer>
+<script type="module" src="./main.js"></script>
+</body>
+</html>
