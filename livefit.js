@@ -464,6 +464,38 @@ export async function exactLists(device, featBuf, n, dim, km, onProgress = null)
   return { I, D };
 }
 
+// The 2 x 2 solve of an alignment from the GPU's sums (WGSL_ALIGN_SUMS), and WGSL_ALIGN_APPLY's uniforms for it
+function solveAlign([ax, ay, bx, by, sxx, sxy, syx, syy, bb, aa], n, { scale = true, reflect = true } = {}) {
+  let best = null;
+  for (const refl of reflect ? [1, -1] : [1]) {   // y' = refl * (sin x + cos y); maximise trace(R^T C)
+    const th = Math.atan2(refl * sxy - syx, sxx + refl * syy), c = Math.cos(th), sn = Math.sin(th), tr = sxx * c - syx * sn + refl * (sxy * sn + syy * c);
+    if (!best || tr > best.tr) best = { tr, c, sn, refl };
+  }
+  // scale by spread, not least squares: a fit from other start positions matches the map only loosely, and the
+  // least-squares scale then shrinks it toward its centre (to a quarter of the size in one test)
+  const sc = !scale ? 1 : bb > 0 && aa > 0 ? Math.sqrt(aa / bb) : 1, { c, sn, refl } = best, uni = new ArrayBuffer(48), u = new Uint32Array(uni), f = new Float32Array(uni);
+  u[0] = n; f.set([sc * c, -sc * sn, refl * sc * sn, refl * sc * c, ax, ay, bx, by], 4);
+  return { uni, out: { scale: sc, angle: Math.atan2(sn, c), flipped: refl < 0, shift: Math.hypot(ax - bx, ay - by) } };
+}
+// The same alignment on two plain position buffers, outside a fit: buf (n rows of x, y) is turned, mirrored if that fits
+// better, scaled and shifted onto refBuf row for row, in place on the GPU (the model compare lines up two models' maps)
+const alignPipes = new WeakMap();
+export async function alignBuffers(device, refBuf, buf, n, opts = {}) {
+  let P = alignPipes.get(device);
+  if (!P) { P = {}; for (const [k, code] of Object.entries({ sums: WGSL_ALIGN_SUMS, apply: WGSL_ALIGN_APPLY })) P[k] = device.createComputePipeline({ label: 'align ' + k, layout: 'auto', compute: { module: device.createShaderModule({ code, label: 'align ' + k }), entryPoint: 'main' } }); alignPipes.set(device, P); }
+  const bind = (p, bufs) => device.createBindGroup({ layout: P[p].getBindGroupLayout(0), entries: bufs.map((b, i) => ({ binding: i, resource: { buffer: b } })) });
+  const U = GPUBufferUsage, uS = device.createBuffer({ size: 16, usage: U.UNIFORM | U.COPY_DST }), uA = device.createBuffer({ size: 48, usage: U.UNIFORM | U.COPY_DST });
+  const sb = device.createBuffer({ size: 64, usage: U.STORAGE | U.COPY_SRC }), st = device.createBuffer({ size: 40, usage: U.MAP_READ | U.COPY_DST });
+  device.queue.writeBuffer(uS, 0, new Uint32Array([n, 0, 0, 0]));
+  let enc = device.createCommandEncoder(), p = enc.beginComputePass(); p.setPipeline(P.sums); p.setBindGroup(0, bind('sums', [uS, refBuf, buf, sb])); p.dispatchWorkgroups(1); p.end();
+  enc.copyBufferToBuffer(sb, 0, st, 0, 40); device.queue.submit([enc.finish()]);
+  await st.mapAsync(GPUMapMode.READ); const sums = new Float32Array(st.getMappedRange().slice(0)); st.unmap();
+  const { uni, out } = solveAlign(sums, n, opts); device.queue.writeBuffer(uA, 0, uni);
+  enc = device.createCommandEncoder(); p = enc.beginComputePass(); p.setPipeline(P.apply); p.setBindGroup(0, bind('apply', [uA, buf])); p.dispatchWorkgroups(Math.ceil(n / 64)); p.end(); device.queue.submit([enc.finish()]);
+  await device.queue.onSubmittedWorkDone(); for (const b of [uS, uA, sb, st]) b.destroy();
+  return out;
+}
+
 function rng32(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
 export class LiveFit {
@@ -503,8 +535,9 @@ export class LiveFit {
     this.msKnn = 0; this.borrowed = true; return true;
   }
   // the full lists (K_MAX), once: a k above the borrowed lists' waits for them; prefetch starts them in the background
-  async ensureK(k, onProgress) { if (k <= this.km) return; if (!this.fullP) this.fullP = this.neighbours(onProgress, Math.min(K_MAX, this.n - 1)); await this.fullP; }
-  prefetchLists() { if (this.borrowed && !this.fullP) this.fullP = this.neighbours(null, Math.min(K_MAX, this.n - 1)); }
+  // noSearch: the lists came with the dataset (arXiv, 30 per row from the full vectors); k stays within them, nothing is searched
+  async ensureK(k, onProgress) { if (k <= this.km || this.noSearch) return; if (!this.fullP) this.fullP = this.neighbours(onProgress, Math.min(K_MAX, this.n - 1)); await this.fullP; }
+  prefetchLists() { if (this.borrowed && !this.fullP && !this.noSearch) this.fullP = this.neighbours(null, Math.min(K_MAX, this.n - 1)); }
   // Exact lists of the K_MAX nearest other rows (squared Euclidean, ties to the lower row), once per dataset.
   // The lists are built in buffers of their own and swapped in at the end, so lists already in use (borrowed ones) stay
   // valid while a search runs in the background.
@@ -696,20 +729,12 @@ export class LiveFit {
     const { n, device } = this, sb = this.buf(64, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
     device.queue.writeBuffer(this.uni.align, 0, new Uint32Array([n, 0, 0, 0]));
     this.run('alignSums', this.bind('alignSums', [this.uni.align, refBuf, this.posBuf, sb]), 1);
-    const [ax, ay, bx, by, sxx, sxy, syx, syy, bb, aa] = await this.read(sb, 40); sb.destroy();
-    let best = null;
-    for (const refl of reflect ? [1, -1] : [1]) {   // y' = refl * (sin x + cos y); maximise trace(R^T C)
-      const th = Math.atan2(refl * sxy - syx, sxx + refl * syy), c = Math.cos(th), sn = Math.sin(th), tr = sxx * c - syx * sn + refl * (sxy * sn + syy * c);
-      if (!best || tr > best.tr) best = { tr, c, sn, refl };
-    }
-    // scale by spread, not least squares: a fit from other start positions matches the map only loosely, and the
-    // least-squares scale then shrinks it toward its centre (to a quarter of the size in one test)
-    const sc = !scale ? 1 : bb > 0 && aa > 0 ? Math.sqrt(aa / bb) : 1, { c, sn, refl } = best, buf = new ArrayBuffer(48), u = new Uint32Array(buf), f = new Float32Array(buf);
-    u[0] = n; f.set([sc * c, -sc * sn, refl * sc * sn, refl * sc * c, ax, ay, bx, by], 4);
-    device.queue.writeBuffer(this.uni.alignApply, 0, buf);
+    const sums = await this.read(sb, 40); sb.destroy();
+    const { uni, out } = solveAlign(sums, n, { scale, reflect });
+    device.queue.writeBuffer(this.uni.alignApply, 0, uni);
     const enc = device.createCommandEncoder(), p = enc.beginComputePass(); p.setPipeline(this.pipes.alignApply); p.setBindGroup(0, this.bind('alignApply', [this.uni.alignApply, this.posBuf])); p.dispatchWorkgroups(Math.ceil(n / 64)); p.end();
     enc.copyBufferToBuffer(this.posBuf, 0, this.nextPosBuf, 0, n * 8); device.queue.submit([enc.finish()]);
-    return { scale: sc, angle: Math.atan2(sn, c), flipped: refl < 0, shift: Math.hypot(ax - bx, ay - by) };
+    return out;
   }
   // the positions now, kept as the reference a move is pinned to (alignTo(this.refBuf, { scale: false }))
   markReference() { if (!this.refBuf) this.refBuf = this.buf(this.n * 8, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC); const enc = this.device.createCommandEncoder(); enc.copyBufferToBuffer(this.posBuf, 0, this.refBuf, 0, this.n * 8); this.device.queue.submit([enc.finish()]); }

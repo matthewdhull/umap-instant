@@ -10,7 +10,8 @@ Open `index.html` (GitHub Pages). Needs a browser with WebGPU (Chrome or Edge on
 - `?source=` picks a dataset: asrs, wine-reviews, vispubdata, medmcqa, SuperGPQA, ScienceQA, imagewoof, movies,
   census-income, california-housing, or a live feed (wikipedia, nostr, hackernews); none = live Bluesky.
 - `static-data/` holds the ASRS reports (public NASA ASRS synopses, labelled as in the aviation safety dashboard) and
-  precomputed vectors (MiniLM text, DINOv2 images, float16) for the hosted datasets; the tables themselves are read
+  precomputed vectors (MiniLM, BGE and GTE text, DINOv2 and CLIP images, float16) and each model's finished map for the
+  hosted datasets; the tables themselves are read
   from Hugging Face and the other hosts the Embedding Atlas examples use.
 
 This repository is a build output of the research code (streaming-umap, browser_jetstream/build_site.py); edit there.

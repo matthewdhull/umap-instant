@@ -1,0 +1,1 @@
+{"n":9025,"rowsId":"50e1a14f:9025","model":"dinov2","parts":["map_dinov2.f32"],"modelName":"facebook/dinov2-small","fitMs":1421,"steps":1500,"edges":216604,"fittedAt":"2026-10-25T18:00:46.167Z"}

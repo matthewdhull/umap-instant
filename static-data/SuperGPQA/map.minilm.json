@@ -1,0 +1,1 @@
+{"n":26529,"rowsId":"413acabb:26529","model":"minilm","parts":["map_minilm.f32"],"modelName":"sentence-transformers/all-MiniLM-L6-v2","fitMs":21822,"steps":1500,"edges":576010,"fittedAt":"2026-10-25T18:03:09.698Z"}

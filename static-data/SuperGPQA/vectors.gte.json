@@ -1,0 +1,1 @@
+{"n": 26529, "dim": 384, "model": "thenlper/gte-small", "rowsId": "413acabb:26529", "parts": ["vectors_gte_0.f16", "vectors_gte_1.f16", "vectors_gte_2.f16"], "sharedWithDefault": 0.494}

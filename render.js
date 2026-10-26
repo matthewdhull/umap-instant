@@ -4,7 +4,7 @@
 const UNI = /* wgsl */`
 struct Uniforms { center: vec2<f32>, viewport: vec2<f32>, scale: f32, pointPx: f32, mode: u32, nBase: u32, style: u32, flushStart: u32,
                   dimBase: f32, curTime: f32, tMin: f32, tMax: f32, recent: f32, settle: f32, thr: f32, window: f32, density: f32, fitMid: f32, focus: i32, ghost: f32, boost: f32, animNow: f32,
-                  rate: f32, regPal: f32, prevPal: f32, rmix: f32, heatOn: f32, heatPal: f32, heatPrevPal: f32, pad3: f32 };
+                  rate: f32, regPal: f32, prevPal: f32, rmix: f32, heatOn: f32, heatPal: f32, heatPrevPal: f32, between: f32 };
 @group(0) @binding(0) var<uniform> U: Uniforms;
 @group(0) @binding(1) var<storage, read> pos: array<f32>;
 @group(0) @binding(2) var<storage, read> start: array<f32>;
@@ -66,6 +66,8 @@ fn fitColor(s: f32) -> vec3<f32> { let bad = vec3<f32>(0.85, 0.35, 0.19); let mi
       let f = 1.0 - age / U.recent; let gs = growOf(ii); size = U.pointPx * (1.0 + 0.6 * f) * gs; alpha = mix(U.dimBase, 1.0, f) * gs;
     }
   }
+  // in between two maps (a glide from one map to another): the frames are not maps, so the dots are drawn hollow and fainter
+  if (U.between > 0.0 && U.style == 0u) { alpha = alpha * (1.0 - 0.45 * U.between); if (U.between > 0.5) { ring = 1u; size = max(size, U.pointPx * 1.5); } }
   o.p = clipOf(worldOf(ii), corners[vi], size * (0.6 + 0.4 * fade)); o.color = vec4<f32>(rgb, alpha * fade); o.uv = corners[vi]; o.ring = ring; return o;
 }
 @fragment fn fs(in: VSOut) -> @location(0) vec4<f32> {
@@ -167,7 +169,7 @@ struct VSOut { @builtin(position) p: vec4<f32>, @location(0) uv: vec2<f32>, @loc
 const REGION = /* wgsl */`
 struct Uniforms { center: vec2<f32>, viewport: vec2<f32>, scale: f32, pointPx: f32, mode: u32, nBase: u32, style: u32, flushStart: u32,
                   dimBase: f32, curTime: f32, tMin: f32, tMax: f32, recent: f32, settle: f32, thr: f32, window: f32, density: f32, fitMid: f32, focus: i32, ghost: f32, boost: f32, animNow: f32,
-                  rate: f32, regPal: f32, prevPal: f32, rmix: f32, heatOn: f32, heatPal: f32, heatPrevPal: f32, pad3: f32 };
+                  rate: f32, regPal: f32, prevPal: f32, rmix: f32, heatOn: f32, heatPal: f32, heatPrevPal: f32, between: f32 };
 struct RU { ex0: f32, ey0: f32, spanX: f32, spanY: f32, alpha: f32, half: f32, lo: f32, hi: f32 };
 @group(0) @binding(0) var<uniform> U: Uniforms;
 @group(0) @binding(1) var<uniform> R: RU;
@@ -262,7 +264,7 @@ export class PointRenderer {
     this.pGlow = mkPipe(ARRIVAL, 'arrival glow', ADD, this.format); this.pCore = mkPipe(ARRIVAL, 'arrival core', BLEND, this.format);
     this.uniGlow = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); this.uniCore = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.quadIdx = device.createBuffer({ size: 12, usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST }); device.queue.writeBuffer(this.quadIdx, 0, new Uint16Array([0, 1, 2, 0, 2, 3]));
-    this.uniRegion = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); this.regionAlpha = 0.7; this.regions = null; this.tintRef = 4; this.tintScale = 0.15; this.tintG = 512;
+    this.uniRegion = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); this.regionAlpha = 0.3; this.regions = null; this.tintRef = 4; this.tintScale = 0.15; this.tintG = 512;
     this.tintTex = device.createTexture({ size: [this.tintG, this.tintG], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     this.tintTex2 = device.createTexture({ size: [this.tintG, this.tintG], format: 'rgba16float', usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING }); this.tintSoft = 6;
     this.hlIds = device.createBuffer({ size: 65536 * 4, usage: S }); this.hlKinds = device.createBuffer({ size: 65536 * 4, usage: S }); this.hlCount = 0;
@@ -293,7 +295,16 @@ export class PointRenderer {
     this.bg.glow = d.createBindGroup({ layout: this.pGlow.getBindGroupLayout(0), entries: arrival(this.uniGlow) });
     this.bg.core = d.createBindGroup({ layout: this.pCore.getBindGroupLayout(0), entries: arrival(this.uniCore) });
     this.bg.hl = d.createBindGroup({ layout: this.pHighlight.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.uni } }, { binding: 1, resource: { buffer: this.srcPos } }, { binding: 4, resource: { buffer: this.hlIds } }, { binding: 5, resource: { buffer: this.hlKinds } }] });   // the highlight shader reads neither start nor tsec
+    if (this.compare) {   // the compare's right-hand map: the same dots, colours and highlights from the other model's positions
+      const B = this.compare.buf;
+      this.bg.pointsB = d.createBindGroup({ layout: this.pPoints.getBindGroupLayout(0), entries: ent([this.uni, B, B, this.tBuf, this.attrBuf, this.palBuf, this.scoreBuf, this.regionBuf, this.animBuf]) });
+      this.bg.hlB = d.createBindGroup({ layout: this.pHighlight.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: this.uni } }, { binding: 1, resource: { buffer: B } }, { binding: 4, resource: { buffer: this.hlIds } }, { binding: 5, resource: { buffer: this.hlKinds } }] });
+    } else this.bg.pointsB = this.bg.hlB = null;
   }
+  // Model compare (main.js): buf holds another model's finished map of the same rows, aligned onto this one; the map left of
+  // the divider (x: its share of the canvas width) is drawn from the usual positions, the map right of it from buf. Each side
+  // is a finished map; moving the divider only moves the scissor line, nothing is recomputed. null ends the compare.
+  setCompare(buf, n = 0, x = 0.5) { this.compare = buf ? { buf, n, x } : null; this.rebuildBindGroups(); }
   // View buffers: a second pair of position buffers (start, pos) that the rewind and the time-lapse draw from, so scrubbing
   // through old layouts never touches the engine's own buffers; every shader reads whichever pair is current.
   get srcPos() { return this.viewOn ? this.viewPosBuf : this.posOverride || this.engine.posBuf; }
@@ -380,7 +391,7 @@ export class PointRenderer {
     dv.setFloat32(16, v.scale, true); dv.setFloat32(20, this.pointPx * dpr, true); dv.setUint32(24, this.mode, true); dv.setUint32(28, this.data.nBase, true);
     dv.setUint32(32, style, true); dv.setUint32(36, this.flushStart, true); dv.setFloat32(40, this.dimBase, true); dv.setFloat32(44, this.curTime, true);
     dv.setFloat32(48, this.tMin, true); dv.setFloat32(52, this.tMax, true); dv.setFloat32(56, this.recentWindow, true); dv.setFloat32(60, this.settle, true);
-    dv.setFloat32(64, this.threshold, true); dv.setFloat32(68, this.growthWindow, true); dv.setFloat32(72, this.densityScale, true); dv.setFloat32(76, this.fitMid, true); dv.setInt32(80, this.focusRegion, true); dv.setFloat32(84, this.ghostAlpha, true); dv.setFloat32(88, this.arrivalBoost, true); dv.setFloat32(92, this.animNow, true); dv.setFloat32(96, this.rate, true); dv.setFloat32(100, this.regPalOff, true); dv.setFloat32(104, this.prevPalOff, true); dv.setFloat32(108, this.rmix, true); dv.setFloat32(112, this.heatOn ? 1 : 0, true); dv.setFloat32(116, this.heatPalOff, true); dv.setFloat32(120, this.heatPrevPalOff, true);
+    dv.setFloat32(64, this.threshold, true); dv.setFloat32(68, this.growthWindow, true); dv.setFloat32(72, this.densityScale, true); dv.setFloat32(76, this.fitMid, true); dv.setInt32(80, this.focusRegion, true); dv.setFloat32(84, this.ghostAlpha, true); dv.setFloat32(88, this.arrivalBoost, true); dv.setFloat32(92, this.animNow, true); dv.setFloat32(96, this.rate, true); dv.setFloat32(100, this.regPalOff, true); dv.setFloat32(104, this.prevPalOff, true); dv.setFloat32(108, this.rmix, true); dv.setFloat32(112, this.heatOn ? 1 : 0, true); dv.setFloat32(116, this.heatPalOff, true); dv.setFloat32(120, this.heatPrevPalOff, true); dv.setFloat32(124, this.between || 0, true);
     this.device.queue.writeBuffer(buf, 0, dv.buffer);
   }
   // true while the GPU is FRAMES_AHEAD frames behind: callers that queue their own GPU work per frame (tune mode) wait too
@@ -396,7 +407,8 @@ export class PointRenderer {
       const p = enc.beginRenderPass({ timestampWrites: tw('growth splat'), colorAttachments: [{ view: this.densityTex.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }] });
       p.setPipeline(this.pSplat); p.setBindGroup(0, this.bg.splat); p.draw(6, nHist); p.end();
     }
-    const tints = this.regions && this.bg.tint && this.regionAlpha > 0;
+    const cmp = this.compare && this.bg.pointsB ? this.compare : null, cw = this.canvas.width, chh = this.canvas.height, xs = cmp ? Math.max(0, Math.min(cw, Math.round(cmp.x * cw))) : cw;
+    const tints = this.regions && this.bg.tint && this.regionAlpha > 0 && !cmp;   // region shading belongs to one map: off while comparing
     if (tints) { this.device.queue.writeBuffer(this.uniRegion, 16, new Float32Array([this.regionAlpha]));
       const p = enc.beginRenderPass({ timestampWrites: tw('tint splat'), colorAttachments: [{ view: this.tintTex.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }] });
       p.setPipeline(this.pTint); p.setBindGroup(0, this.bg.tint); p.setIndexBuffer(this.quadIdx, 'uint16'); p.drawIndexed(6, this.data.nBase); p.end();
@@ -404,6 +416,7 @@ export class PointRenderer {
         const h = enc.beginRenderPass({ timestampWrites: tw('blur across'), colorAttachments: [{ view: this.tintTex2.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }] }); h.setPipeline(this.pBlur); h.setBindGroup(0, this.bg.blurH); h.draw(3); h.end();
         const v = enc.beginRenderPass({ timestampWrites: tw('blur down'), colorAttachments: [{ view: this.tintTex.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: 'clear', storeOp: 'store' }] }); v.setPipeline(this.pBlur); v.setBindGroup(0, this.bg.blurV); v.draw(3); v.end(); } }
     const pass = enc.beginRenderPass({ timestampWrites: tw('screen'), colorAttachments: [{ view: this.ctx.getCurrentTexture().createView(), clearValue: { r: 0.043, g: 0.055, b: 0.075, a: 1 }, loadOp: 'clear', storeOp: 'store' }] });
+    if (cmp) pass.setScissorRect(0, 0, xs, chh);
     if (tints) { pass.setPipeline(this.pRegion); pass.setBindGroup(0, this.bg.region); pass.draw(6); }
     pass.setPipeline(this.pPoints); pass.setBindGroup(0, this.bg.points); pass.draw(6, nHist);
     if (this.growth) { pass.setPipeline(this.pComp); pass.setBindGroup(0, this.bg.comp); pass.draw(3); }
@@ -411,6 +424,10 @@ export class PointRenderer {
     const nFresh = nHist - firstRecent;
     if (nFresh > 0 && this.arrivalBoost > 0) { pass.setPipeline(this.pGlow); pass.setBindGroup(0, this.bg.glow); pass.draw(6, nFresh, 0, firstRecent); pass.setPipeline(this.pCore); pass.setBindGroup(0, this.bg.core); pass.draw(6, nFresh, 0, firstRecent); }
     if (this.hlCount) { pass.setPipeline(this.pHighlight); pass.setBindGroup(0, this.bg.hl); pass.draw(6, this.hlCount); }
+    if (cmp && xs < cw) {
+      pass.setScissorRect(xs, 0, cw - xs, chh); pass.setPipeline(this.pPoints); pass.setBindGroup(0, this.bg.pointsB); pass.draw(6, Math.min(cmp.n, nHist));
+      if (this.hlCount) { pass.setPipeline(this.pHighlight); pass.setBindGroup(0, this.bg.hlB); pass.draw(6, this.hlCount); }
+    }
     pass.end();
     if (tsRead) { const m = tsNames.length * 2; enc.resolveQuerySet(this.tsSet, 0, m, this.tsResolve, 0); enc.copyBufferToBuffer(this.tsResolve, 0, tsRead, 0, m * 8); }
     this.device.queue.submit([enc.finish()]); this.inFlight++;

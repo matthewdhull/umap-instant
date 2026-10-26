@@ -2,7 +2,7 @@
 // flush per tick of stream time (or per websocket batch when live). GPU (WebGPU) does the exact search,
 // the adopter radius test, the fuzzy weights and the Jacobi placement; the CPU does neighbour-list
 // bookkeeping (merges, evictions, incident rows) and label inheritance.
-import { K, TOPK_THREADS, WGSL_DISTANCE, WGSL_TOPK_PARTIAL, WGSL_TOPK_MERGE, WGSL_WEIGHTS, WGSL_JACOBI, WGSL_MEAN, WGSL_RANKS, WGSL_REBUILD } from './kernels.js';
+import { K, TOPK_THREADS, WGSL_DISTANCE, WGSL_TOPK_PARTIAL, WGSL_TOPK_MERGE, WGSL_WEIGHTS, WGSL_JACOBI, WGSL_MEAN, WGSL_RANKS, WGSL_RANKS_GRID, RANK_CAP, WGSL_REBUILD } from './kernels.js';
 import { exactLists } from './livefit.js';
 
 const QTILE = 64;                 // queries per distance tile (d2 scratch = QTILE x N floats)
@@ -10,6 +10,7 @@ const ADOPTER_CAP = 1 << 20;      // adopter candidate entries per flush (16 MB)
 export const JACOBI_ITERS = 20, JACOBI_TOL = 1e-6;
 export const FLUSH_CAP = 2048;    // arrivals per flush; a larger backlog is placed in consecutive flushes
 const EMPTY = 0xffffffff, UNLABELLED = 0xffff;
+const RANKS_GRID_MIN = 262144;   // maps this big score through the grid (K7g); smaller ones keep the pass over every row (K7)
 
 // Load a capture (relay output + derived base). extraCapacity reserves rows for live arrivals.
 export async function loadData(captureUrl, baseName, onProgress, extraCapacity = 0) {
@@ -147,7 +148,7 @@ export class StreamingEngine {
     this.pipes = {
       dist: makePipeline(d, WGSL_DISTANCE, 'K1 distance+adopters'), partial: makePipeline(d, WGSL_TOPK_PARTIAL, 'K2 partial top15'),
       merge: makePipeline(d, WGSL_TOPK_MERGE, 'K3 merge top15'), weights: makePipeline(d, WGSL_WEIGHTS, 'K4 weights'),
-      jacobi: makePipeline(d, WGSL_JACOBI, 'K5 jacobi'), mean: makePipeline(d, WGSL_MEAN, 'K6 mean movement'), ranks: makePipeline(d, WGSL_RANKS, 'K7 2-D ranks'), rebuild: makePipeline(d, WGSL_REBUILD, 'K8 quiet rebuild step') };
+      jacobi: makePipeline(d, WGSL_JACOBI, 'K5 jacobi'), mean: makePipeline(d, WGSL_MEAN, 'K6 mean movement'), ranks: makePipeline(d, WGSL_RANKS, 'K7 2-D ranks'), ranksGrid: makePipeline(d, WGSL_RANKS_GRID, 'K7g 2-D ranks on a grid'), rebuild: makePipeline(d, WGSL_REBUILD, 'K8 quiet rebuild step') };
     // quiet rebuild state: every row's anchor (its position at the last rebuild, or the base fit) and whether it is leashed
     this.anchor = new Float32Array(N * 2); this.anchored = new Uint8Array(N); this.rebuilds = 0; this.lastRebuild = null; this.placedAtRebuild = 0;
     this.rpBufs = Array.from({ length: 80 }, (_, i) => d.createBuffer({ label: 'rebuild params ' + i, size: 48, usage: U | CD }));
@@ -179,7 +180,7 @@ export class StreamingEngine {
     this.device.queue.writeBuffer(this.posBuf, 0, this.pos); this.device.queue.writeBuffer(this.radius2Buf, 0, this.radius2); this.device.queue.writeBuffer(this.startBuf, 0, this.start);
     this.knn2Idx.fill(-1); this.knn2Dist.fill(Infinity); this.radius2D.fill(0); this.imp.fill(0); this.ledger = { net: 0, gross: 0, since: 0, created: 0, removed: 0 };
     this.anchor.fill(0); this.anchor.set(baseXY); this.anchored.fill(0); this.anchored.fill(1, 0, nBase); this.rebuilds = 0; this.lastRebuild = null; this.placedAtRebuild = 0;
-    this.baseRanksReady = this.computeRanks(0, nBase, nBase, this.data.bIdx);
+    this.baseRanksReady = this.noLedger ? Promise.resolve() : this.computeRanks(0, nBase, nBase, this.data.bIdx);   // a throwaway engine's map is never scored
     this._ledgerP = this.noLedger ? Promise.resolve() : this.lazyLedger ? null : this._initLedger();
   }
   get ledgerReady() { if (!this._ledgerP) this._ledgerP = this._initLedger(); return this._ledgerP; }
@@ -317,12 +318,16 @@ export class StreamingEngine {
     const off = new Uint32Array(nr + 1); for (let c = 0; c < nr; c++) off[c + 1] = off[c] + deg[c];
     const E0 = off[nr], tIdx = new Uint32Array(E0), tW = new Float32Array(E0), fill = new Uint32Array(nr);
     for (let c = 0; c < nr; c++) { if ((c & 1023) === 1023) await turn(); const i = rows[c]; for (let k = 0; k < K; k++) { const j = this.knnIdx[i * K + k]; if (j < 0 || cidx[j] < 0) continue; const cj = cidx[j], w = W[c * K + k]; let p = off[c] + fill[c]++; tIdx[p] = cj; tW[p] = w; p = off[cj] + fill[cj]++; tIdx[p] = c; tW[p] = w; } }
-    const idx = new Uint32Array(E0), ew = new Float32Array(E0), off2 = new Uint32Array(nr + 1); let E = 0;
+    const idx = new Uint32Array(E0), ew = new Float32Array(E0), off2 = new Uint32Array(nr + 1); let E = 0, ord = new Uint32Array(256);
     for (let c = 0; c < nr; c++) {
-      if ((c & 511) === 511) await turn();
-      const a = off[c], b = off[c + 1], ord = []; for (let p = a; p < b; p++) ord.push(p); ord.sort((x, y) => tIdx[x] - tIdx[y]);
+      if ((c & 4095) === 4095) await turn();
+      const a = off[c], m = off[c + 1] - a; if (m > ord.length) ord = new Uint32Array(2 * m);
+      // stable insertion sort of the row's entries by neighbour (the same order as Array.sort, without an array per row:
+      // at 3 million rows those arrays cost more than the sorting)
+      if (m <= 256) for (let t = 0; t < m; t++) { const p = a + t, key = tIdx[p]; let z = t; while (z > 0 && tIdx[ord[z - 1]] > key) { ord[z] = ord[z - 1]; z--; } ord[z] = p; }
+      else { const o = []; for (let t = 0; t < m; t++) o.push(a + t); o.sort((x, y) => tIdx[x] - tIdx[y]); ord.set(o); }   // a hub row: n log n
       off2[c] = E; let last = -1;
-      for (const p of ord) { const j = tIdx[p], w = tW[p]; if (j === last) { const u = ew[E - 1]; ew[E - 1] = u + w - u * w; } else { idx[E] = j; ew[E] = w; E++; last = j; } }
+      for (let t = 0; t < m; t++) { const p = ord[t], j = tIdx[p], w = tW[p]; if (j === last) { const u = ew[E - 1]; ew[E - 1] = u + w - u * w; } else { idx[E] = j; ew[E] = w; E++; last = j; } }
     }
     off2[nr] = E;
     return { off2, idx, ew, E };
@@ -353,9 +358,13 @@ export class StreamingEngine {
   // exactLists: per-query workgroup selection, 4 x 4 blocked distances), then rho and sigma from the weights kernel.
   // Entry for entry the same idx, dist, rho and sigma as _refresh over every row (whose dist/partial/merge pipeline took
   // 96 s on 163,749 x 384 rows); _refresh itself still serves placement and quiet rebuilds.
-  async _baseLists(n) {
+  // given: neighbour lists shipped with the dataset ({ idx, dist, k } with k >= K, nearest first, computed ahead of time on
+  // the full vectors, as for arXiv): their first K columns are used and nothing is searched here
+  async _baseLists(n, given = null) {
     const d = this.device, q = d.queue, S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-    const { I, D } = await exactLists(d, this.featBuf, n, this.dim, K);
+    let I, D;
+    if (given) { I = new Int32Array(n * K); D = new Float32Array(n * K); for (let r = 0; r < n; r++) for (let c = 0; c < K; c++) { I[r * K + c] = given.idx[r * given.k + c]; D[r * K + c] = given.dist[r * given.k + c]; } }
+    else ({ I, D } = await exactLists(d, this.featBuf, n, this.dim, K));
     for (let i = 0; i < n * K; i++) { this.knnIdx[i] = I[i]; this.knnDist[i] = D[i]; }
     for (let r = 0; r < n; r++) { const rad = D[r * K + K - 1]; this.radius2[r] = rad * rad; }
     q.writeBuffer(this.radius2Buf, 0, this.radius2);
@@ -372,14 +381,14 @@ export class StreamingEngine {
   // Fresh base map in the browser: exact 15-lists, rho and sigma for the first nBase rows of `feat` (self excluded), the
   // symmetrised fuzzy graph, and a UMAP layout from a PCA start with Adam (negatives redrawn every 8 steps, learning rate
   // decaying to zero). Returns the arrays loadData would have read from a base folder. Float32 throughout.
-  static async fitBase(device, feat, nBase, dim, { a, b, steps = 800, lr = 0.08, clip = 4, negScale = 1, seed = 1, initSd = 3.0, negEvery = 8, init = null, onProgress = null, search = 'fast' } = {}) {
+  static async fitBase(device, feat, nBase, dim, { a, b, steps = 800, lr = 0.08, clip = 4, negScale = 1, seed = 1, initSd = 3.0, negEvery = 8, init = null, onProgress = null, search = 'fast', lists = null } = {}) {
     const t0 = performance.now();
     const data = { N: nBase, n: nBase, dim, k: K, nBase, a, b, featS: feat, baseXY: new Float32Array(nBase * 2), bIdx: new Int32Array(nBase * K), bDist: new Float32Array(nBase * K), bRho: new Float32Array(nBase), bSigma: new Float32Array(nBase), tS: new Float32Array(nBase), wallS: new Float32Array(nBase), labelS: new Uint16Array(nBase), replyS: new Uint8Array(nBase), posts: [] };
     const tmp = new StreamingEngine(device, data, { noLedger: true }); await tmp.ledgerReady;
     const rows = new Array(nBase); for (let i = 0; i < nBase; i++) rows[i] = i;
     onProgress?.('base fit: exact neighbour lists');
     if (search === 'refresh' || nBase <= K) await tmp._refresh(rows, { feat: tmp.featBuf, dim, kI: tmp.knnIdx, kD: tmp.knnDist, radius: tmp.radius2, radiusBuf: tmp.radius2Buf, weights: true });
-    else await tmp._baseLists(nBase);
+    else await tmp._baseLists(nBase, lists && lists.n === nBase ? lists : null);
     const t1 = performance.now(); onProgress?.('base fit: fuzzy graph');
     const cidx = new Int32Array(nBase); for (let i = 0; i < nBase; i++) cidx[i] = i;
     const W = await tmp._rowWeights(rows); const graph = await tmp._csrGraph(rows, cidx, W);
@@ -433,6 +442,7 @@ export class StreamingEngine {
   widthUnit() { if (this._width) return this._width; const a = []; for (let i = 0; i < this.data.nBase; i++) if (this.radius2D[i] > 0) a.push(Math.sqrt(this.radius2D[i])); a.sort((x, y) => x - y); this._width = a.length ? a[a.length >> 1] : 1; return this._width; }
 
   async computeRanks(qBase, count, n, nbrIds, posBuf = this.posBuf, target = this.ranks, targetOffset = qBase * K) {
+    if (n >= RANKS_GRID_MIN) return this.computeRanksGrid(qBase, count, n, nbrIds, posBuf, target, targetOffset);   // a pass over every row costs n x n
     const d = this.device, q = d.queue, S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
     const nbrBuf = this.growable('rank nbr', count * K * 4, S), outBuf = this.growable('rank out', count * K * 4, S);
     q.writeBuffer(nbrBuf, 0, nbrIds instanceof Int32Array ? new Uint32Array(nbrIds.buffer, nbrIds.byteOffset, count * K) : nbrIds);
@@ -447,6 +457,38 @@ export class StreamingEngine {
     }
     const [raw] = await this.readMany([{ buffer: outBuf, bytes: count * K * 4 }]);
     target.set(new Uint32Array(raw), targetOffset);
+  }
+
+  // computeRanks through a uniform grid (K7g): the same counts below RANK_CAP, RANK_CAP above. The grid holds about four rows
+  // a cell over the map's bounding box, built here by a counting sort of the GPU's own positions (so every distance is
+  // computed from the same float32 values as K7's).
+  async computeRanksGrid(qBase, count, n, nbrIds, posBuf = this.posBuf, target = this.ranks, targetOffset = qBase * K) {
+    const d = this.device, q = d.queue, S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, turn = this._turner();
+    const [praw] = await this.readMany([{ buffer: posBuf, bytes: n * 8 }]); const P = new Float32Array(praw);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < n; i++) { const x = P[2 * i], y = P[2 * i + 1]; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    const cs = Math.max(Math.sqrt(Math.max((x1 - x0) * (y1 - y0), 1e-12) * 4 / n), 1e-9);
+    const gx = Math.min(Math.floor((x1 - x0) / cs) + 1, 8192), gy = Math.min(Math.floor((y1 - y0) / cs) + 1, 8192), csx = Math.max(cs, (x1 - x0) / (gx - 0.5)), csy = Math.max(cs, (y1 - y0) / (gy - 0.5)), c2 = Math.max(csx, csy);
+    const cellOf = new Uint32Array(n), start = new Uint32Array(gx * gy + 1);
+    for (let i = 0; i < n; i++) { const cx = Math.min(gx - 1, Math.max(0, Math.floor((P[2 * i] - x0) / c2))), cy = Math.min(gy - 1, Math.max(0, Math.floor((P[2 * i + 1] - y0) / c2))); const c = cy * gx + cx; cellOf[i] = c; start[c + 1]++; }
+    for (let c = 0; c < gx * gy; c++) start[c + 1] += start[c];
+    await turn(); const fill = start.slice(0, gx * gy), pts = new Float32Array(n * 2), ids = new Uint32Array(n);
+    for (let i = 0; i < n; i++) { const t = fill[cellOf[i]]++; pts[2 * t] = P[2 * i]; pts[2 * t + 1] = P[2 * i + 1]; ids[t] = i; }
+    const startBuf = this.growable('rank grid start', start.byteLength, S), ptsBuf = this.growable('rank grid points', pts.byteLength, S), idsBuf = this.growable('rank grid ids', ids.byteLength, S);
+    q.writeBuffer(startBuf, 0, start); q.writeBuffer(ptsBuf, 0, pts); q.writeBuffer(idsBuf, 0, ids);
+    const nbrBuf = this.growable('rank nbr', count * K * 4, S), outBuf = this.growable('rank out', count * K * 4, S);
+    q.writeBuffer(nbrBuf, 0, nbrIds instanceof Int32Array ? new Uint32Array(nbrIds.buffer, nbrIds.byteOffset, count * K) : nbrIds);
+    const CH = 32768, pipe = this.pipes.ranksGrid.pipeline;
+    for (let lo = 0; lo < count; lo += CH) {   // pieces, each waited for, so no one submission runs long and flush work can slot in
+      const c = Math.min(CH, count - lo), rp = d.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }), pb = new ArrayBuffer(32);
+      new Uint32Array(pb, 0, 4).set([qBase + lo, c, gx, gy]); new Float32Array(pb, 16, 3).set([x0, y0, c2]); q.writeBuffer(rp, 0, pb);
+      const e = d.createCommandEncoder(), pass = e.beginComputePass(); pass.setPipeline(pipe);
+      pass.setBindGroup(0, d.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: rp } }, { binding: 1, resource: { buffer: posBuf } }, { binding: 2, resource: { buffer: nbrBuf, offset: lo * K * 4, size: c * K * 4 } }, { binding: 3, resource: { buffer: outBuf, offset: lo * K * 4, size: c * K * 4 } }, { binding: 4, resource: { buffer: startBuf, size: start.byteLength } }, { binding: 5, resource: { buffer: ptsBuf, size: pts.byteLength } }, { binding: 6, resource: { buffer: idsBuf, size: ids.byteLength } }] }));
+      pass.dispatchWorkgroups(Math.ceil(c / 64)); pass.end(); q.submit([e.finish()]); await q.onSubmittedWorkDone(); rp.destroy();
+    }
+    const [raw] = await this.readMany([{ buffer: outBuf, bytes: count * K * 4 }]);
+    target.set(new Uint32Array(raw), targetOffset);
+    this.lastRanks = { grid: [gx, gy], cell: c2, cap: RANK_CAP };
   }
 
   adoptersOf(p) { const out = []; const n = this.n, idx = this.knnIdx; for (let i = 0; i < n; i++) { const b = i * K; for (let k = 0; k < K; k++) if (idx[b + k] === p) { out.push(i); break; } } return out; }

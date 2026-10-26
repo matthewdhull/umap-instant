@@ -20,6 +20,13 @@ const movieDate = (r) => { const d = new Date(Date.parse(r['Release Date'] + ' U
 const join = (...xs) => xs.filter((x) => x !== null && x !== undefined && x !== '').join(' · ');
 
 export const DATASETS = {
+  // about 3 million arXiv papers (Cornell's metadata snapshot, CC0), prepared ahead of time on a GPU by arxiv/build_arxiv.py:
+  // MiniLM vectors reduced to 64 principal components, and each paper's 30 nearest papers by the full vectors, so the browser
+  // neither embeds nor searches; the files sit on a separate host (static-data/arxiv/info.json says where), never in Git
+  arxiv: {
+    label: 'arXiv papers', what: 'arXiv papers (titles and abstracts)', noun: 'papers', one: 'paper', kind: 'lists', dim: 64, capRows: 3200000,
+    time: 'year', date: (r) => Date.UTC(r[2], 0), categoryName: 'field',
+  },
   asrs: {
     label: 'ASRS safety reports', what: 'ASRS aviation safety reports', noun: 'reports', one: 'report', kind: 'vectors',
     local: '../data/jetstream_demo/static/asrs/', time: 'month', date: (r) => Date.UTC(+r.month.slice(0, 4), +r.month.slice(5, 7) - 1),
@@ -90,3 +97,25 @@ export const DATASETS = {
     show: (r) => join(`median income ${(+r.MedInc).toFixed(1)}`, `house value ${(+r.MedHouseVal).toFixed(2)}`, `${(+r.Latitude).toFixed(2)}, ${(+r.Longitude).toFixed(2)}`),
   },
 };
+
+// text models to compare (the page's model picker, ?model=): all give 384 numbers per text, so the GPU buffers stay the same
+// size; `id` is the transformers.js (ONNX) copy, `name` the original, `pool` how token vectors become one text vector
+export const TEXT_MODELS = {
+  minilm: { label: 'MiniLM-L6 (sentence-transformers)', id: 'Xenova/all-MiniLM-L6-v2', name: 'sentence-transformers/all-MiniLM-L6-v2', pool: 'mean' },
+  bge: { label: 'BGE-small (BAAI)', id: 'Xenova/bge-small-en-v1.5', name: 'BAAI/bge-small-en-v1.5', pool: 'cls' },
+  gte: { label: 'GTE-small (Alibaba)', id: 'Xenova/gte-small', name: 'thenlper/gte-small', pool: 'mean' },
+};
+// image models to compare (the same picker for an image dataset): DINOv2 learned from pictures alone, CLIP from pictures
+// with their captions; `dim` differs (384, 512), which a static dataset's buffers allow (they are sized when it loads)
+export const IMAGE_MODELS = {
+  dinov2: { label: 'DINOv2-small (Meta)', id: 'Xenova/dinov2-small', name: 'facebook/dinov2-small', dim: 384 },
+  clip: { label: 'CLIP ViT-B/32 (OpenAI)', id: 'Xenova/clip-vit-base-patch32', name: 'openai/clip-vit-base-patch32', dim: 512 },
+};
+// the picker's models for a dataset kind, and the one used when ?model= names none of them
+export const modelsFor = (kind) => (kind === 'text' ? TEXT_MODELS : kind === 'image' ? IMAGE_MODELS : null);
+export const defaultModel = (kind) => (kind === 'text' ? 'minilm' : kind === 'image' ? 'dinov2' : null);
+
+// the data menu's order (quick to load and worth a look first) and each dataset's first-visit load time in seconds, measured
+// on the public site from an empty browser cache (Apple M-series Mac, 2026-10-24); a repeat visit reads this browser's cache
+export const MENU_ORDER = ['vispubdata', 'arxiv', 'imagewoof', 'movies', 'SuperGPQA', 'ScienceQA', 'asrs', 'california-housing', 'census-income', 'wine-reviews', 'medmcqa'];
+export const LOAD_S = { vispubdata: 8, imagewoof: 11, movies: 7, SuperGPQA: 12, ScienceQA: 15, asrs: 24, 'california-housing': 7, 'census-income': 17, 'wine-reviews': 37, medmcqa: 37 };

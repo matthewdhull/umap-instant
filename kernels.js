@@ -206,6 +206,59 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid:
   if (lid.x < K) { ranks[q * K + lid.x] = atomicLoad(&counts[lid.x]); }
 }`;
 
+// K7g: the same ranks on a big map, through a uniform grid of the 2-D positions instead of a pass over every row. Only
+// "is the count below W" is ever read, and W is at most RANK_CAP (the largest window the page offers), so each count stops
+// at RANK_CAP: a query visits rings of cells outward from its own and stops once every neighbour either has RANK_CAP
+// closer rows or lies nearer than the next ring can reach. Counts below RANK_CAP are the K7 counts (same positions, same
+// float32 distances, same strict comparison); larger counts read as RANK_CAP. One thread per query.
+export const RANK_CAP = 100;
+export const WGSL_RANKS_GRID = /* wgsl */`
+const K: u32 = ${K}u;
+const CAP: u32 = ${RANK_CAP}u;
+struct GP { qBase: u32, qCount: u32, gx: u32, gy: u32, x0: f32, y0: f32, cs: f32, pad: u32 };
+@group(0) @binding(0) var<uniform> P: GP;
+@group(0) @binding(1) var<storage, read> pos: array<f32>;
+@group(0) @binding(2) var<storage, read> nbr: array<u32>;
+@group(0) @binding(3) var<storage, read_write> ranks: array<u32>;
+@group(0) @binding(4) var<storage, read> cellStart: array<u32>;
+@group(0) @binding(5) var<storage, read> pts: array<vec2<f32>>;
+@group(0) @binding(6) var<storage, read> ids: array<u32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let q = gid.x; if (q >= P.qCount) { return; }
+  let g = P.qBase + q; let qx = pos[2u * g]; let qy = pos[2u * g + 1u];
+  var r: array<f32, K>; var c: array<u32, K>; var nj: array<u32, K>;
+  for (var k: u32 = 0u; k < K; k = k + 1u) { let j = nbr[q * K + k]; nj[k] = j; let dx = pos[2u * j] - qx; let dy = pos[2u * j + 1u] - qy; r[k] = dx * dx + dy * dy; c[k] = 0u; }
+  let gx = i32(P.gx); let gy = i32(P.gy);
+  let cx = clamp(i32(floor((qx - P.x0) / P.cs)), 0, gx - 1); let cy = clamp(i32(floor((qy - P.y0) / P.cs)), 0, gy - 1);
+  let fx = qx - (P.x0 + f32(cx) * P.cs); let fy = qy - (P.y0 + f32(cy) * P.cs);
+  let edge = max(0.0, min(min(fx, P.cs - fx), min(fy, P.cs - fy)));
+  let maxR = max(max(cx, gx - 1 - cx), max(cy, gy - 1 - cy));
+  for (var R: i32 = 0; R <= maxR; R = R + 1) {
+    if (R > 0) {   // nearest any row of ring R can be (shaved by 1e-4 so float rounding never stops a ring early)
+      let m = (edge + f32(R - 1) * P.cs) * 0.9999; let m2 = m * m; var open = false;
+      for (var k: u32 = 0u; k < K; k = k + 1u) { if (c[k] < CAP && m2 < r[k]) { open = true; } }
+      if (!open) { break; }
+    }
+    for (var yy: i32 = cy - R; yy <= cy + R; yy = yy + 1) {
+      if (yy < 0 || yy >= gy) { continue; }
+      let full = (yy == cy - R) || (yy == cy + R); let stepX = select(max(2 * R, 1), 1, full);
+      for (var xx: i32 = cx - R; xx <= cx + R; xx = xx + stepX) {
+        if (xx < 0 || xx >= gx) { continue; }
+        let cell = u32(yy * gx + xx);
+        for (var t: u32 = cellStart[cell]; t < cellStart[cell + 1u]; t = t + 1u) {
+          let id = ids[t]; if (id == g) { continue; }
+          let p = pts[t]; let dx = p.x - qx; let dy = p.y - qy; let d = dx * dx + dy * dy;
+          // a neighbour never counts against itself (in K7 its distance equals r exactly; here the compiler may round the
+          // two computations differently, so it is excluded by row)
+          for (var k: u32 = 0u; k < K; k = k + 1u) { if (d < r[k] && id != nj[k]) { c[k] = c[k] + 1u; } }
+        }
+      }
+    }
+  }
+  for (var k: u32 = 0u; k < K; k = k + 1u) { ranks[q * K + k] = min(c[k], CAP); }
+}`;
+
 // K8: one step of the quiet rebuild (NodeGardener v3's maintenance move, WP-H4's penalised optimiser in float32):
 // every living row takes one synchronous Adam step on the UMAP cross-entropy over its symmetrised fuzzy edges (CSR),
 // five fixed negative rows, and a leash to its anchor (weight lambda for rows present at the previous rebuild, 0 for

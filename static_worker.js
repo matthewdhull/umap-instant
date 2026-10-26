@@ -2,16 +2,17 @@
 // vector and posts the whole window to the page in the recording worker's protocol (ready, frames, backfilled), so the
 // first half of the rows becomes the base map and the rest the stream. Nothing arrives after the window.
 // Vectors: text through MiniLM-L6 (mean pooling, 128 tokens, L2-normalised: the live feeds' recipe), images through
-// DINOv2-small (the class token), table rows as standardised numbers (log for long-tailed positive columns, one-hot for
+// DINOv2-small (the class token) or CLIP ViT-B/32 (?model=clip: its projected image vector), table rows as standardised numbers (log for long-tailed positive columns, one-hot for
 // categories), ASRS through its packed TF-IDF features. Text and images are embedded on this machine's GPU through the
 // page server (serve.py POST /embed, torch), as Embedding Atlas embeds its examples ahead of time, when it answers;
 // otherwise in the browser (transformers.js on WebGPU). Embedded windows are kept in IndexedDB, so a second visit to the
 // same dataset skips the download and the encoder.
 // Time: a table with dates is placed on a real time axis (the window maps linearly onto the dates, rows on the same date
 // spread evenly up to the next date); the page labels it in the dataset's unit.
-import { DATASETS } from './datasets.js';
+import { DATASETS, TEXT_MODELS, IMAGE_MODELS, modelsFor, defaultModel } from './datasets.js';
+import { uploadDataset, getFile, readRows, vectorOf } from './upload.js';
 
-const TEXT_ID = 'Xenova/all-MiniLM-L6-v2', TEXT_MODEL = 'sentence-transformers/all-MiniLM-L6-v2', IMAGE_ID = 'Xenova/dinov2-small', IMAGE_MODEL = 'facebook/dinov2-small';
+let TM = TEXT_MODELS.minilm, TM_KEY = 'minilm', IM = IMAGE_MODELS.dinov2, IM_KEY = 'dinov2';
 const TF = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3', HYP = 'https://cdn.jsdelivr.net/npm/hyparquet@1.31.2/+esm', HYPC = 'https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.1/+esm';
 const FRAME = 2048, CACHE_DB = 'jetstream-static-datasets';
 let running = false;
@@ -34,8 +35,13 @@ function fnv(strings) { let h = 0x811c9dc5; for (const s of strings) { for (let 
 // float16 <-> float32 (IEEE half): the precomputed vectors are stored as halves (wine's would be 252 MB as float32)
 function toHalf(f) { const b = new DataView(new ArrayBuffer(4)); b.setFloat32(0, f); const x = b.getUint32(0), s = (x >>> 16) & 0x8000; let e = ((x >>> 23) & 0xff) - 112, m = x & 0x7fffff; if (e <= 0) { if (e < -10) return s; m |= 0x800000; const t = 14 - e; return s | ((m + (1 << (t - 1))) >> t); } if (e >= 31) return s | 0x7c00; const h = s | (e << 10) | (m >> 13); return (m & 0x1000) ? h + 1 : h; }
 function fromHalves(u16) { const out = new Float32Array(u16.length); for (let i = 0; i < u16.length; i++) { const h = u16[i], s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, m = h & 1023; out[i] = e === 0 ? s * m * 2 ** -24 : e === 31 ? (m ? NaN : s * Infinity) : s * (1 + m / 1024) * 2 ** (e - 15); } return out; }
-async function precomputed(key, rowsId) {
-  const f = await findStatic(key, 'vectors.json'); if (!f || f.json.rowsId !== rowsId) return null;
+// the default model's vectors are vectors.json (MiniLM for text, DINOv2 for images, as before), another model's
+// vectors.<model>.json
+const modelKey = (kind) => (kind === 'text' ? TM_KEY : kind === 'image' ? IM_KEY : null);
+const vecTag = (kind) => (modelKey(kind) && modelKey(kind) !== defaultModel(kind) ? modelKey(kind) : '');
+const vecFile = (kind) => (vecTag(kind) ? `vectors.${vecTag(kind)}.json` : 'vectors.json');
+async function precomputed(key, rowsId, kind = 'text') {
+  const f = await findStatic(key, vecFile(kind)); if (!f || f.json.rowsId !== rowsId || f.json.model !== (kind === 'text' ? TM : IM).name) return null;
   note(`Reading ${DATASETS[key].label}: precomputed vectors…`); const v = fromHalves(new Uint16Array(await fetchParts(f.base, f.json.parts)));
   return { vecs: v, dim: f.json.dim, model: f.json.model, hf: f.json.model, device: 'precomputed', loadMs: 0 };
 }
@@ -43,8 +49,9 @@ async function precomputed(key, rowsId) {
 async function exportVectors(key, w) {
   const PART = 8 << 20, half = new Uint16Array(w.vecs.length); for (let i = 0; i < half.length; i++) half[i] = toHalf(w.vecs[i]);
   const bytes = new Uint8Array(half.buffer), parts = [];
-  for (let o = 0, j = 0; o < bytes.length; o += PART, j++) { const name = `vectors_${j}.f16`; await fetch(`/save?path=${key}/${name}`, { method: 'POST', body: bytes.subarray(o, o + PART) }); parts.push(name); }
-  await fetch(`/save?path=${key}/vectors.json`, { method: 'POST', body: JSON.stringify({ n: w.posts.length, dim: w.dim, model: w.model, rowsId: w.rowsId, parts }) });
+  const kind = DATASETS[key].kind, tag = vecTag(kind) ? `${vecTag(kind)}_` : '';
+  for (let o = 0, j = 0; o < bytes.length; o += PART, j++) { const name = `vectors_${tag}${j}.f16`; await fetch(`/save?path=${key}/${name}`, { method: 'POST', body: bytes.subarray(o, o + PART) }); parts.push(name); }
+  await fetch(`/save?path=${key}/${vecFile(kind)}`, { method: 'POST', body: JSON.stringify({ n: w.posts.length, dim: w.dim, model: w.model, rowsId: w.rowsId, parts }) });
   log(`${key}: exported ${w.posts.length} vectors (${parts.length} parts)`);
 }
 
@@ -73,6 +80,7 @@ function parseCsv(text) {   // RFC 4180: quoted fields, doubled quotes, newlines
   const head = rows.shift(); return rows.map((r) => Object.fromEntries(head.map((h, j) => [h, r[j] ?? ''])));
 }
 async function readTable(D, label) {
+  if (D.upload) { note(`Reading ${label}…`); return readRows(await getFile(), D.format); }   // your own file, from this browser's storage
   if (D.format === 'parquet') {
     const { asyncBufferFromUrl, parquetMetadataAsync, parquetReadObjects } = await import(HYP), { compressors } = await import(HYPC);
     // a file up to 100 MB comes down in one request (much faster than a range request per row group); a larger one
@@ -112,6 +120,7 @@ async function gpu() {
   return gpuInfo;
 }
 async function gpuEmbed(body) {
+  body = { ...body, model: body.kind === 'text' ? TM_KEY : IM_KEY };   // serve.py embeds with the same model (sentence-transformers, transformers)
   const r = await fetch(new URL('/embed', self.location.href), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   if (!r.ok) throw new Error(`GPU encoder: HTTP ${r.status} ${r.statusText}`);
   return { v: new Float32Array(await r.arrayBuffer()), dim: +r.headers.get('X-Dim') };
@@ -121,7 +130,7 @@ async function gpuEmbed(body) {
 // waiting, so it never slows the embedding.
 let tokenizer = null;
 async function tokensOf(text) {
-  try { tf = tf || await import(TF); tf.env.allowLocalModels = false; tokenizer = tokenizer || await tf.AutoTokenizer.from_pretrained(TEXT_ID); return tokenizer.tokenize(text).slice(0, 24); }
+  try { tf = tf || await import(TF); tf.env.allowLocalModels = false; tokenizer = tokenizer || await tf.AutoTokenizer.from_pretrained(TM.id); return tokenizer.tokenize(text).slice(0, 24); }
   catch { return text.split(/\s+/).slice(0, 24); }
 }
 let peeked = false;
@@ -143,7 +152,7 @@ async function embedOnGpu(items, kind, label, info) {
     note(`Embedding ${label}: ${Math.min(items.length, lo + step).toLocaleString()} of ${items.length.toLocaleString()} on this machine's GPU (${info.device})`);
   }
   stats.embed_ms = performance.now() - t0;
-  return { vecs: out, dim, model: kind === 'text' ? TEXT_MODEL : IMAGE_MODEL, hf: kind === 'text' ? TEXT_MODEL : IMAGE_MODEL, device: `this machine's GPU (torch ${info.device})`, loadMs: 0 };
+  return { vecs: out, dim, model: kind === 'text' ? TM.name : IM.name, hf: kind === 'text' ? TM.name : IM.name, device: `this machine's GPU (torch ${info.device})`, loadMs: 0 };
 }
 let tf = null;
 async function encoder(task, id) {
@@ -155,10 +164,10 @@ async function encoder(task, id) {
   throw new Error(`no backend could load ${id}`);
 }
 async function embedTexts(texts, label) {
-  const { ex, device, loadMs } = await encoder('feature-extraction', TEXT_ID), dim = 384, out = new Float32Array(texts.length * dim), t0 = performance.now();
+  const { ex, device, loadMs } = await encoder('feature-extraction', TM.id), dim = 384, out = new Float32Array(texts.length * dim), t0 = performance.now();
   // the live feeds' recipe: at most 128 tokens, chunks of 32; a non-finite row (the WebGPU backend returns one now and
   // then) is embedded again alone, then on the wasm backend
-  const run = async (e, xs) => { const t = await e(xs, { pooling: 'mean', normalize: true, truncation: true, max_length: 128 }); const v = Float32Array.from(t.data); t.dispose?.(); return v; };
+  const run = async (e, xs) => { const t = await e(xs, { pooling: TM.pool, normalize: true, truncation: true, max_length: 128 }); const v = Float32Array.from(t.data); t.dispose?.(); return v; };
   const finite = (v, j) => { for (let k = 0; k < dim; k++) if (!Number.isFinite(v[j * dim + k])) return false; return true; };
   // batches are padded to their longest text, so texts go through in length order and come back to their rows
   let fallback = null, pend = []; const byLen = texts.map((t, i) => i).sort((a, b) => texts[a].length - texts[b].length), tmp = new Float32Array(32 * dim);
@@ -168,7 +177,7 @@ async function embedTexts(texts, label) {
       let one = tmp.subarray(j * dim, (j + 1) * dim);
       if (!finite(one, 0)) {
         one = await run(ex, [chunk[j]]);
-        if (!finite(one, 0)) { fallback = fallback || await tf.pipeline('feature-extraction', TEXT_ID, { device: 'wasm', dtype: 'fp32' }); one = await run(fallback, [chunk[j]]); stats.nan_repaired_wasm = (stats.nan_repaired_wasm || 0) + 1; }
+        if (!finite(one, 0)) { fallback = fallback || await tf.pipeline('feature-extraction', TM.id, { device: 'wasm', dtype: 'fp32' }); one = await run(fallback, [chunk[j]]); stats.nan_repaired_wasm = (stats.nan_repaired_wasm || 0) + 1; }
         else stats.nan_repaired = (stats.nan_repaired || 0) + 1;
       }
       out.set(one, ids[j] * dim);
@@ -176,19 +185,19 @@ async function embedTexts(texts, label) {
     pend.push(...ids); if (pend.length >= 512) { peek(out, dim, pend, texts, 'text', texts.length); pend = []; }
     if (lo % 512 === 0) note(`Embedding ${label}: ${Math.min(texts.length, lo + 32).toLocaleString()} of ${texts.length.toLocaleString()} on ${device}`);
   }
-  stats.embed_ms = performance.now() - t0; return { vecs: out, dim, model: TEXT_MODEL, hf: TEXT_ID, device, loadMs };
+  stats.embed_ms = performance.now() - t0; return { vecs: out, dim, model: TM.name, hf: TM.id, device, loadMs };
 }
 async function embedImages(blobs, label, b64s = null) {
-  const { ex, device, loadMs } = await encoder('image-feature-extraction', IMAGE_ID); let dim = 0, out = null; const t0 = performance.now();
+  const { ex, device, loadMs } = await encoder('image-feature-extraction', IM.id); let dim = 0, out = null; const t0 = performance.now();
   for (let i = 0; i < blobs.length && running; i += 16) {
     const imgs = await Promise.all(blobs.slice(i, i + 16).map((b) => tf.RawImage.fromBlob(b)));
-    const t = await ex(imgs);   // [batch, tokens, dim]: the class token is the image's vector
-    const [B, T, H] = t.dims; if (!out) { dim = H; out = new Float32Array(blobs.length * dim); }
+    const t = await ex(imgs);   // DINOv2: [batch, tokens, dim], the class token is the image's vector; CLIP: [batch, dim], already one vector
+    const [B, T, H] = t.dims.length === 2 ? [t.dims[0], 1, t.dims[1]] : t.dims; if (!out) { dim = H; out = new Float32Array(blobs.length * dim); }
     for (let b = 0; b < B; b++) { const v = t.data.subarray(b * T * H, b * T * H + H); let s = 0; for (const x of v) s += x * x; s = Math.sqrt(s) || 1; for (let k = 0; k < H; k++) out[(i + b) * dim + k] = v[k] / s; }
     if (b64s) peek(out, dim, Array.from({ length: B }, (_, k) => i + k), b64s, 'image', blobs.length);
     note(`Embedding ${label}: ${Math.min(blobs.length, i + 16).toLocaleString()} of ${blobs.length.toLocaleString()} images on ${device}`);
   }
-  stats.embed_ms = performance.now() - t0; return { vecs: out, dim, model: IMAGE_MODEL, hf: IMAGE_ID, device, loadMs };
+  stats.embed_ms = performance.now() - t0; return { vecs: out, dim, model: IM.name, hf: IM.id, device, loadMs };
 }
 function tableVectors(rows, D) {   // standardised numbers; log1p for long-tailed positive columns; one-hot categories (top 24) at weight 0.7
   const cols = [];
@@ -257,6 +266,16 @@ async function cachePrune() {   // entries written by other versions of this cac
 async function load(key, cap) {
   const D = DATASETS[key]; if (!D) throw new Error(`no dataset called ${key}`);
   const label = D.label;
+  if (D.kind === 'lists') {   // arXiv (arxiv/build_arxiv.py): rows, 64-number vectors and 30-neighbour lists, all in parts
+    const f = await findStatic(key, 'info.json'); if (!f) throw new Error(`${label} is not available here (no static-data/${key}/info.json)`);
+    const info = f.json, base = info.base || f.base, n = info.n; note(`Reading ${label}: ${n.toLocaleString()} papers…`);
+    let got = 0; const part = (p) => fetchBuf(base + p).then((b) => { got += b.byteLength; note(`Reading ${label}: ${mb(got)}`); return b; });
+    const cat = async (parts) => { const bufs = await Promise.all(parts.map(part)), out = new Uint8Array(bufs.reduce((a, b) => a + b.byteLength, 0)); let o = 0; for (const b of bufs) { out.set(new Uint8Array(b), o); o += b.byteLength; } return out.buffer; };
+    const [rowsArr, vbuf, ibuf, dbuf] = await Promise.all([Promise.all(info.rowParts.map((p) => fetch(base + p).then((r) => r.json()))).then((a) => a.flat()), cat(info.vectorParts), cat(info.knnIdxParts), cat(info.knnDistParts)]);
+    const field = (c) => String(info.categories[c] || '').split('.')[0];   // the archive (cs, math, hep-th, ...) colours the map
+    return { posts: rowsArr.map((r) => ({ text: r[0], kind: `${info.categories[r[1]]} · ${r[2]}`, url: `https://arxiv.org/abs/${r[3]}`, cat: field(r[1]) })), dates: rowsArr.map(D.date),
+      vecs: fromHalves(new Uint16Array(vbuf)), dim: info.dim, lists: { idx: new Int32Array(ibuf), dist: fromHalves(new Uint16Array(dbuf)), k: info.k, n }, model: info.model || 'sentence-transformers/all-MiniLM-L6-v2 (64 principal components)', hf: 'precomputed', device: 'precomputed', loadMs: 0, total: n };
+  }
   if (D.kind === 'vectors') {   // packed locally (ASRS): info.json, rows.json, vectors as float32
     const f = await findStatic(key, 'info.json'); if (!f) throw new Error(`${label} is not packed here: run python3 browser_jetstream/pack_asrs.py`);
     const base = f.base, info = f.json; note(`Reading ${label}…`);
@@ -268,6 +287,7 @@ async function load(key, cap) {
   let rows = await readTable(D, label); const total = rows.length;
   if (D.dedupe) { const seen = new Set(); rows = rows.filter((r) => { const k = D.dedupe(r); if (!k || seen.has(k)) return false; seen.add(k); return true; }); stats.duplicate = total - rows.length; }
   if (D.kind === 'text') rows = rows.filter((r) => (D.text(r) || '').trim());
+  if (D.kind === 'upload-vectors') rows = rows.filter((r) => vectorOf(r[D.embedding]));
   if (D.date) rows = rows.filter((r) => D.date(r) != null);   // a dated table: rows without a date have no place on the axis
   const take = pick(rows.length, cap, D.date ? rows.map(D.date) : null), sel = take.map((i) => rows[i]);
   const show = (r) => (D.show ? String(D.show(r)) : ''), cat = (r) => (D.category ? String(D.category(r) ?? '') || '(none)' : undefined);
@@ -277,10 +297,16 @@ async function load(key, cap) {
     const v = (!exporting && await precomputed(key, rowsId)) || (server ? await embedOnGpu(texts, 'text', label, server) : await embedTexts(texts, label));
     return { ...v, ...extra, rowsId, posts: sel.map((r, i) => ({ text: texts[i], kind: show(r), url: D.link ? D.link(r) : undefined, cat: cat(r) })) };
   }
+  if (D.kind === 'upload-vectors') {   // your file's own vectors: used as they are (L2-normalised), nothing embedded
+    const first = vectorOf(sel[0][D.embedding]), dim = first.length, vecs = new Float32Array(sel.length * dim); let bad = 0;
+    sel.forEach((r, i) => { const v = vectorOf(r[D.embedding]); if (!v || v.length !== dim) { bad++; return; } let q = 0; for (const x of v) q += x * x; q = Math.sqrt(q) || 1; for (let k = 0; k < dim; k++) vecs[i * dim + k] = v[k] / q; });
+    if (bad) log(`${bad} rows had no vector of ${dim} numbers: placed at the origin of the vector space`);
+    return { ...extra, vecs, dim, model: `${D.embedding} (your file's vectors)`, hf: 'your file', device: 'your file', loadMs: 0, posts: sel.map((r) => ({ text: D.text(r) || show(r), kind: show(r), cat: cat(r) })) };
+  }
   if (D.kind === 'image') {
     const b64 = (bytes) => { let s = ''; for (let i = 0; i < bytes.length; i += 32768) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 32768)); return btoa(s); }, enc = sel.map((r) => b64(r.image.bytes));
     const rowsId = fnv(sel.map((r, i) => `${show(r)}|${r.image.bytes.length}|${enc[i].slice(0, 64)}`));
-    const v = (!exporting && await precomputed(key, rowsId)) || (server ? await embedOnGpu(enc, 'image', label, server) : await embedImages(sel.map((r) => new Blob([r.image.bytes], { type: 'image/jpeg' })), label, enc));
+    const v = (!exporting && await precomputed(key, rowsId, 'image')) || (server ? await embedOnGpu(enc, 'image', label, server) : await embedImages(sel.map((r) => new Blob([r.image.bytes], { type: 'image/jpeg' })), label, enc));
     return { ...v, ...extra, rowsId, posts: sel.map((r, i) => ({ text: show(r), kind: show(r), img: 'data:image/jpeg;base64,' + enc[i], cat: cat(r) })) };
   }
   const v = tableVectors(sel, D), terms = tableTerms(sel, D);
@@ -293,7 +319,10 @@ onmessage = async (ev) => {
     running = true;
     try {
       useGpu = m.gpu !== false; exporting = !!m.export;
-      const key = m.relay, D = DATASETS[key], cap = m.rows || 0, ck = `${key}|${cap || 'all'}|${CACHE_V}`, t0 = performance.now(); cachePrune();
+      if (m.model && TEXT_MODELS[m.model]) { TM_KEY = m.model; TM = TEXT_MODELS[m.model]; }
+      if (m.model && IMAGE_MODELS[m.model]) { IM_KEY = m.model; IM = IMAGE_MODELS[m.model]; }
+      if (m.upload) DATASETS.upload = { ...uploadDataset(m.upload), embedding: m.upload.embedding };   // your own file (upload.js)
+      const key = m.relay, D = DATASETS[key], cap = m.rows || 0, ck = `${key}|${cap || 'all'}|${CACHE_V}${vecTag(D.kind) ? '|' + vecTag(D.kind) : ''}${D.upload ? '|' + m.upload.id : ''}`, t0 = performance.now(); cachePrune();
       const worth = D.kind === 'text' || D.kind === 'image';   /* packed vectors and tables load in seconds: not cached */
       let w = worth && !exporting ? await cacheGet(ck) : null; const cached = !!w;
       if (!w) { w = await load(key, cap); if (!running) return; }
@@ -316,7 +345,12 @@ onmessage = async (ev) => {
       } else for (let i = 0; i < n; i++) T[i] = (i + 0.5) / n * span;
       let baseEndUs = m.liveStartUs + 1;   // past every row: all of them are the base map
       if (m.untilMs && w.dates) { let k = 0; while (k < n && w.dates[k] <= m.untilMs) k++; if (k > 0 && k < n) baseEndUs = Math.round(m.cursorUs + T[k]); }
-      postMessage({ type: 'ready', model: w.model, hf: w.hf, device: cached ? 'this browser\'s cache' : w.device, dim, loadMs: performance.now() - t0, cursorUs: m.cursorUs, liveStartUs: m.liveStartUs, stream: key, rows: n, total: w.total, baseEndUs, timeAxis, colors: w.colors || null, categoryName: D.categoryName || null });
+      // the model lesson: how many of each item's 15 nearest neighbours the other models agree on with the default model
+      // (MiniLM for text, DINOv2 for images; model_overlap.py)
+      let agreement = null; const models = modelsFor(D.kind);
+      if (models && !D.upload) { agreement = {}; for (const k of Object.keys(models)) { if (k === defaultModel(D.kind)) continue; const f = await findStatic(key, `vectors.${k}.json`); const v = f?.json?.sharedWithDefault ?? f?.json?.sharedWithMinilm; if (v != null) agreement[k] = v; } }
+      postMessage({ type: 'ready', agreement, rowsId: w.rowsId || null, modelKey: modelKey(D.kind), model: w.model, hf: w.hf, device: cached ? 'this browser\'s cache' : w.device, dim, loadMs: performance.now() - t0, cursorUs: m.cursorUs, liveStartUs: m.liveStartUs, stream: key, rows: n, total: w.total, baseEndUs, timeAxis, colors: w.colors || null, categoryName: D.categoryName || null });
+      if (w.lists) postMessage({ type: 'lists', ...w.lists }, [w.lists.idx.buffer, w.lists.dist.buffer]);   // shipped neighbour lists: the page searches nothing
       const posts = w.posts.map((p, i) => ({ uri: `${key}/${i}`, time_us: Math.round(m.cursorUs + T[i]), did: '', rkey: '', text: p.text || '', tags: [], reply: 0, embed: 0, kind: p.kind, url: p.url, img: p.img, terms: p.terms, cat: p.cat }));
       stats.events = stats.post_creates = w.total || n; stats.kept = stats.embedded = n;
       for (let lo = 0; lo < n && running; lo += FRAME) {

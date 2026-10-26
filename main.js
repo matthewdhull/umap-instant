@@ -1,11 +1,13 @@
 import { loadData, StreamingEngine, JACOBI_ITERS, FLUSH_CAP, kmeans, pcaAxes, pcaProject } from './engine.js';
 import { openCache, readRange, writeFrame, prune, countAll } from './cache.js';
 import { PointRenderer, heatRgb, HEAT_PALETTES } from './render.js';
-import { tunedLayout, tunedFromParam, tunedToParam } from './livefit.js';
+import { tunedLayout, tunedFromParam, tunedToParam, alignBuffers } from './livefit.js';
 import { saveHandoff, loadHandoff, saveSnapshot, dropSnapshot } from './handoff.js';
 import { TuneMode } from './tunemode.js';
 import { Cast3D } from './cast3d.js';
-import { DATASETS } from './datasets.js';
+import { DATASETS, MENU_ORDER, LOAD_S, modelsFor, defaultModel } from './datasets.js';
+import { findMap, keepMap, exportMap, keepOnScreen, onScreenMap } from './maps.js';
+import { putFile, readRows, inspect, formatOf, uploadDataset, savedSpec, SPEC_KEY } from './upload.js';
 import { PALETTE, computeRegions, computeRegionsSteps, docsSteps, runSliced, nameClusters, docsOf, setNsfwWords, setNsfwFilter, nsfwFilterOn , setNamingMinShare, setNamingSlots } from './regions.js';
 
 const $ = (id) => document.getElementById(id);
@@ -32,13 +34,17 @@ const SOURCES = {
 };
 // Static datasets (datasets.js): a finished table, loaded and embedded by static_worker.js, played like a recording (the
 // first half of its rows is the base map, the rest arrives as the stream); nothing arrives after it.
-for (const [key, D] of Object.entries(DATASETS)) SOURCES[key] = { key, what: D.what, noun: D.noun, one: D.one, feed: D.label, h1: `${D.label}: ${params.get('until') && D.time ? `the map up to a date; Play places the rest in date order` : `one map of every ${D.one}; similar ${D.noun} sit together`}`, minWords: 0, filter: `${D.what}; ${D.time ? 'in date order on a time axis by ' + D.time : 'in a fixed random order, with no time axis'}`, fresh: 60, static: true, kind: D.kind, caps: D.caps, rows: +(params.get('rows') || 0), worker: './static_worker.js' };
+// your own file (upload.js): registered from this tab's saved choice before the sources are listed
+const UPLOAD = params.get('source') === 'upload' ? savedSpec() : null;
+if (UPLOAD) DATASETS.upload = { ...uploadDataset(UPLOAD), embedding: UPLOAD.embedding };
+for (const [key, D] of Object.entries(DATASETS)) SOURCES[key] = { key, what: D.what, noun: D.noun, one: D.one, feed: D.label, h1: `${D.label}: ${params.get('until') && D.time ? `the map up to a date; Play places the rest in date order` : `one map of every ${D.one}; similar ${D.noun} sit together`}`, minWords: 0, filter: `${D.what}; ${D.time ? 'in date order on a time axis by ' + D.time : 'in a fixed random order, with no time axis'}`, fresh: 60, static: true, kind: D.kind, caps: D.caps, dim: D.dim, capRows: D.capRows, rows: +(params.get('rows') || 0), worker: './static_worker.js' };
 // A packaged copy (a shared artifact) carries recordings in rec/ and cannot reach the live feeds: the dataset comes from the
 // link's #token (artifacts pass no query string), each source reads its recording through recorded_worker.js.
 const RECORDED = await fetch('./rec/index.json', { cache: 'no-store' }).then(r => (r.ok ? r.json() : null)).catch(() => null);
 const REC_KEY = RECORDED ? (RECORDED.sources[location.hash.slice(1)] ? location.hash.slice(1) : RECORDED.default) : null;
 const BAD_SOURCE = params.get('source') && !SOURCES[params.get('source')] ? params.get('source') : null;
 const SOURCE = RECORDED ? RECORDED.sources[REC_KEY].source : SOURCES[params.get('source')] ? params.get('source') : 'jetstream', SRC = SOURCES[SOURCE];
+if (UPLOAD && SRC) { SRC.dim = UPLOAD.dim || 384; SRC.rows = 0; }   // an uploaded file's vectors set the buffer sizes
 if (RECORDED) { const r = RECORDED.sources[REC_KEY]; Object.assign(SRC, { recorded: `./rec/${REC_KEY}/`, worker: './recorded_worker.js', fresh: r.minutes, feed: 'a recording', h1: SRC.h1.replace(' · local relay', '') + ' · recorded ' + r.when }); addEventListener('hashchange', () => location.reload()); }
 if (SRC.numeric) setNamingMinShare(0.25);
 // Fresh start (the default): the last FRESH minutes of the firehose are fetched and embedded in the browser, the base map
@@ -47,7 +53,7 @@ const FRESH = params.has('capture') || params.get('fresh') === '0' ? 0 : +(param
 const CAPTURE = FRESH ? 'fresh' : (params.get('capture') || 'capture_20261012_0945pdt'), BASE = FRESH ? 'fresh' : (params.get('base') || 'base_30min_originals');
 const BUDGET = +(params.get('budget') || 0);   // living arrivals kept on the map (0 = unlimited); older ones retire
 const LIVE = FRESH > 0 || params.get('live') === '1', LIVE_PORT = +(params.get('port') || 8788), LIVE_SRC = FRESH ? (SOURCE === 'jetstream' ? 'browser' : SOURCE) : (params.get('src') || 'browser');
-const CAP = +(params.get('cap') || (SRC.static && FRESH ? 256000 : FRESH ? (BUDGET ? Math.ceil(BUDGET * 1.15) + 65536 : 220000) : LIVE ? (BUDGET ? Math.ceil(BUDGET * 1.15) + 16384 : 150000) : 0));   // row slots reserved for live arrivals
+const CAP = +(params.get('cap') || (UPLOAD ? UPLOAD.rows + 4096 : SRC.capRows ? SRC.capRows : SRC.static && FRESH ? 256000 : FRESH ? (BUDGET ? Math.ceil(BUDGET * 1.15) + 65536 : 220000) : LIVE ? (BUDGET ? Math.ceil(BUDGET * 1.15) + 16384 : 150000) : 0));   // row slots reserved for live arrivals
 const CAPTURE_URL = `../data/jetstream_demo/${CAPTURE}/`, RELAY = params.get('relay') || 'http://127.0.0.1:8790';   // RELAY: the OpenSky relay
 const state = { playing: false, live: false, ws: null, speed: 10, interval: 0.5, clock: 0, lastStats: null, cumulativeMs: 0, log: [], window: 30, autoThreshold: true, manualKept: 4, baseQ5: 0, baseMedian: 0.4, settleMs: 500, inspect: null, inspectMode: 'both', achieved: 0, liveShift: null, clockWall: 0, animOn: false, frames: 0, worker: null, liveSource: LIVE_SRC, liveStats: null, budget: BUDGET, countFrom: 0, placeBins: new Map(), lastWave: null, arriveBins: new Map(), ledgerLog: [],
   autoRebuild: true, rebuildMinutes: 0.5, rebuildArrivals: 0, playedMs: 0, playWall: 0, lastRebuildPlayed: 0, leash: 30, morphMs: 3000, rebuilding: false, morphing: false, flushBusy: false, lastRebuildClock: 0, rebuildMarks: [], rebuildRequested: false };
@@ -278,9 +284,11 @@ async function flushPendingInner() {
 // Quiet rebuild (NodeGardener v3) and its morph: history leashed, arrivals free; then every dot glides from its old
 // position to its new one while the region tints fade out, are recomputed from the new layout, and fade back in.
 async function doRebuild(reason = 'requested') {
-  if (state.rebuilding) return null; if (view.on) viewExit(); state.rebuilding = true; state.rebuildRequested = false; state.lastRebuildPlayed = playedNow(); const tStart = performance.now(); logEvent('rebuild start', { reason, rows: engine.n, k: state.rebuildMarks.length + 1 });
+  if (state.rebuilding) return null; if (view.on) viewExit(); state.rebuilding = true; await tuner?.settleOff(); state.rebuildRequested = false; state.lastRebuildPlayed = playedNow(); const tStart = performance.now(); logEvent('rebuild start', { reason, rows: engine.n, k: state.rebuildMarks.length + 1 });
   try {
-    status(`Re-laying out ${(engine.n - engine.deadPlaced).toLocaleString()} ${SRC.noun}…`);
+    // why the clusters are about to move, in plain words (shown at the start and kept in the closing note)
+    const fresh = engine.placedTotal - engine.placedAtRebuild, why = { cadence: `${fresh.toLocaleString()} new ${SRC.noun} arrived since the last re-layout`, requested: 'you asked for a re-layout', '3D view': 'the map was changed in 3D', tuned: 'you tuned the base map' }[reason] || reason;
+    status(`Clusters will move: ${why}, so all ${(engine.n - engine.deadPlaced).toLocaleString()} ${SRC.noun} are re-laid out together (quiet rebuild)…`);
     const meanKept = () => { let sum = 0, c = 0; for (let p = 0; p < engine.n; p++) if (engine.alive[p]) { sum += scoreOf(p); c++; } return c ? sum / c * K : 0; };
     await engine.computeRanks(0, engine.n, engine.n, engine.knnIdx.subarray(0, engine.n * K)); const keptBefore = meanKept();
     // Hold every row at its current position for the whole rebuild: the morph mode reads positions from `start`, so the engine's
@@ -295,7 +303,7 @@ async function doRebuild(reason = 'requested') {
     await glide(Math.max(0, state.morphMs));
     const mark = { clock: state.clock, reason, keptBefore, keptAfter, ...st }; state.rebuildMarks.push(mark); state.lastRebuildClock = state.clock; logEvent('rebuild morph done', { k: state.rebuildMarks.length, wallMs: Math.round(performance.now() - tStart) });
     updateReadouts(state.lastStats); render(); drawTimeline(); legend();
-    status(`Re-laid out in ${(st.msTotal / 1000).toFixed(1)} s · ${keptBefore.toFixed(1)} → ${keptAfter.toFixed(1)} of 15 nearest by meaning nearby`);
+    status(`Clusters moved: ${why} · re-laid out in ${(st.msTotal / 1000).toFixed(1)} s · ${keptBefore.toFixed(1)} → ${keptAfter.toFixed(1)} of 15 nearest by meaning nearby`);
     return mark;
   } catch (e) { logEvent('rebuild failed', { message: String(e && e.message || e), stack: String(e && e.stack || '').slice(0, 400) }); console.error('[jet] rebuild failed', e); throw e; }
   finally { state.rebuilding = false; state.morphing = false; renderer.settle = 1; renderer.rmix = 1; }
@@ -304,10 +312,13 @@ async function doRebuild(reason = 'requested') {
 // Next frame, or 50 ms if animation frames are not being delivered (hidden or throttled tab), so a morph can never stall.
 async function glide(T, each = null) {
   const t0 = performance.now(), frame = () => new Promise(r => { let done = false; const go = () => { if (!done) { done = true; r(); } }; requestAnimationFrame(go); setTimeout(go, 50); });
-  while (T > 0) { const t = Math.min(1, (performance.now() - t0) / T), e = t * t * (3 - 2 * t); renderer.settle = e; renderer.rmix = e; if (each) each(e); drawFrame(); scheduleChips(); if (t >= 1) break; await frame(); }
+  while (T > 0) { const t = Math.min(1, (performance.now() - t0) / T), e = t * t * (3 - 2 * t); renderer.settle = e; renderer.rmix = e; betweenMaps(Math.min(1, 6 * Math.min(t, 1 - t))); if (each) each(e); drawFrame(); scheduleChips(); if (t >= 1) break; await frame(); }
   if (each) each(1);
-  renderer.settle = 1; renderer.rmix = 1; state.morphing = false; if (regionPrevS) { regionPrevS.set(regionS); renderer.updateRegionIds(regionS, 0, engine.n, regionPrevS); } drawFrame(); scheduleChips();
+  betweenMaps(0); renderer.settle = 1; renderer.rmix = 1; state.morphing = false; if (regionPrevS) { regionPrevS.set(regionS); renderer.updateRegionIds(regionS, 0, engine.n, regionPrevS); } drawFrame(); scheduleChips();
 }
+// dtour's rule for animated transitions: only the maps at either end mean anything, so while a glide runs between two maps
+// the dots are drawn hollow and fainter and a small tag says so (render.js, U.between)
+function betweenMaps(w) { renderer.between = w; const tag = $('betweenTag'); if (tag) tag.classList.toggle('on', w > 0.05); }
 async function requestRebuild() { if (view.on) viewExit(); if (state.flushBusy || state.playing) { state.rebuildRequested = true; status('Re-layout queued'); if (!state.playing) { await flushPending(); } } else await doRebuild('requested'); }
 // Capped history: when living arrivals exceed the budget, retire the excess from among the oldest living arrivals
 // (a pool of four times the excess, older than the emphasis window), densest first by 15th-neighbour radius in feature
@@ -830,7 +841,7 @@ function inspectAt(clientX, clientY) {
   if (view.on) return;
   const c = $('map'), r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1, v = renderer.view;
   const wx = v.cx + ((clientX - r.left) * dpr - c.width / 2) / v.scale, wy = v.cy - ((clientY - r.top) * dpr - c.height / 2) / v.scale;
-  const P = engine.pos; let best = -1, bd = Infinity;
+  const P = MOD.cmp && (clientX - r.left) / r.width > MOD.cmp.x ? MOD.xy.get(MOD.cmp.right) : engine.pos; let best = -1, bd = Infinity;   // right of the compare's divider: the other model's map
   for (let p = 0; p < engine.n; p++) { if (!engine.alive[p]) continue; const dx = P[2 * p] - wx, dy = P[2 * p + 1] - wy, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = p; } }
   if (best < 0 || Math.sqrt(bd) * v.scale > 12 * dpr) { clearInspect(); return; }
   const nb = Array.from(engine.knnIdx.subarray(best * K, best * K + K)), ad = engine.adoptersOf(best);
@@ -848,7 +859,8 @@ function showInspect() {
   $('inspectTitle').textContent = `Inspected ${SRC.one}`; $('inspect-title').textContent = `${SRC.one[0].toUpperCase() + SRC.one.slice(1)} ${p.toLocaleString()}${SRC.static ? (SRC.timeAxis ? ` · ${tLabel(data.tS[p])}` : '') : ` · ${mmss(data.tS[p])} of stream time (${wall(data.wallS[p])} local)`} · ${p < data.nBase ? 'starting map' : 'new arrival'}${post.reply ? ' · reply' : ''}`;
   const reg = regions && regionS[p] >= 0 ? regions.regions[regionS[p]] : null;
   $('inspect-post').innerHTML = (post.img ? `<img class="thumb" src="${post.img}" alt="">` : '') + esc(post.text) + `<small><i class="sw" style="background:${data.labelColors[lab] || '#666'}"></i>${esc(dispName(lab))}${reg ? ` · region: ${esc(dispName(reg.name))}` : (regions ? ' · outside every region' : '')}${post.tags.length ? ' · #' + post.tags.map(esc).join(' #') : ''}${post.score != null ? ` · score ${post.score}${post.descendants != null ? `, ${post.descendants} comments` : ''}` : ''}${post.kind ? ` · ${esc(String(post.kind))}` : ''}</small>`;
-  $('inspect-body').innerHTML = `<div><i class="sw" style="background:#59e6c7"></i>${K} nearest by meaning (its current list)</div><div><i class="sw" style="background:#fa80c8"></i>${I.adopters.length} ${SRC.noun} list it among their own ${K} nearest (adopters)</div><div><i class="sw" style="background:#ffd959"></i>${mutual} are both</div><small>lists are as of ${mmss(state.clock)}; neighbours placed later than this post can appear</small>`;
+  const under = MODELS && (MOD.shown !== MODEL || MOD.cmp) ? ` under ${mshort(MODEL)}, the model this page loaded` : '';
+  $('inspect-body').innerHTML = `<div><i class="sw" style="background:#59e6c7"></i>${K} nearest by meaning${under} (its current list)</div><div><i class="sw" style="background:#fa80c8"></i>${I.adopters.length} ${SRC.noun} list it among their own ${K} nearest (adopters)</div><div><i class="sw" style="background:#ffd959"></i>${mutual} are both</div><small>lists are as of ${mmss(state.clock)}; neighbours placed later than this post can appear</small>`;
   $('inspect-nbrs').innerHTML = I.neighbours.slice(0, 5).map((j, k) => { const q = data.posts[j]; const t = q.text.length > 220 ? q.text.slice(0, 217) + '…' : q.text; return `<div class="nbr"><b>${k + 1}.</b> ${esc(t)}</div>`; }).join('');
 }
 
@@ -1001,8 +1013,169 @@ function drawPreview(col) {
 // only then does the map appear, every row gliding from its place in the cloud to its place on the map with nothing else
 // running, so the glide gets every frame. A dated table can then be scrubbed back on the timeline; a table without dates
 // has no timeline and nothing to play.
+// ---- The model a text or image dataset is embedded with (?model=, the model picker), and the model compare.
+// The page loads one model's vectors and fits its map. Every other model's finished map of the same rows (maps.js: shipped
+// with the site, or kept in this browser after one fit) is fetched once the map has settled, lined up with the loaded map
+// (rotation, mirror, scale and shift: Procrustes on the GPU) and kept, so picking a model swaps the map on screen in one
+// frame, and "Compare with" shows two models' maps under a divider. Each side is a finished map: nothing is ever tweened
+// from one model's map to another's (dtour's rule: only finished maps are maps). A model with no finished map yet is fitted
+// by reloading the page with it, once; after that its map is in this browser. What needs the shown model's own vectors
+// (3D, the tuner, keep settling, how well placed) reloads the page with that model, keeping the map that was on screen.
+const KIND = DATASETS[SOURCE]?.kind, MODELS = SRC.static ? modelsFor(KIND) : null, MODEL = MODELS?.[params.get('model')] ? params.get('model') : MODELS ? defaultModel(KIND) : null;
+const mshort = (k) => MODELS[k].label.replace(/ \(.*\)/, '');
+const MOD = { shown: MODEL, xy: new Map(), gpu: new Map(), from: {}, anchor: null, log: [], cmp: null, ready: false };
+const KEEP_KEY = 'jet.keepMap';   // sessionStorage: a reload asked for by a model-dependent control shows the map that was on screen
+// a model switch happens in the page only on a map of the whole table, fitted from its rows (no rewind)
+const switchable = () => !!(MODELS && SRC.rowsId && !UNTIL && engine && data && engine.n === data.nBase && !LOAD.on);
+function urlWithModel(k) { const u = new URL(location.href); if (k === defaultModel(KIND)) u.searchParams.delete('model'); else u.searchParams.set('model', k); for (const q of ['until', 'fresh']) u.searchParams.delete(q); return u; }
+async function reloadWith(k, why) {
+  if (why && switchable() && MOD.xy.has(k)) try { await keepOnScreen(SOURCE, k, SRC.rowsId, MOD.xy.get(k)); sessionStorage.setItem(KEEP_KEY, JSON.stringify({ source: SOURCE, model: k, rowsId: SRC.rowsId })); } catch { /* the reload fits afresh */ }
+  status(why ? `${why} needs ${mshort(k)}'s own vectors: reloading with them (the map stays as it is)…` : `No finished map of ${mshort(k)} here yet: reloading to fit it on your GPU (once; after that switching to it is instant)…`);
+  location.href = urlWithModel(k).toString();
+}
+// true when the shown model is not the loaded one, after starting the reload that fixes it
+function needsLoaded(why) { if (!MODELS || MOD.shown === MODEL) return false; reloadWith(MOD.shown, why); return true; }
+// the map the page asked to keep across a reload (reloadWith), if it is this load's: read once
+async function keptMap(n) {
+  let k = null; try { k = JSON.parse(sessionStorage.getItem(KEEP_KEY) || 'null'); sessionStorage.removeItem(KEEP_KEY); } catch { /* none */ }
+  return k && k.source === SOURCE && k.model === MODEL && k.rowsId === SRC.rowsId ? onScreenMap(SOURCE, MODEL, SRC.rowsId, n) : null;
+}
+const gpuXY = (xy) => { const b = device.createBuffer({ size: xy.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC }); device.queue.writeBuffer(b, 0, xy); return b; };
+async function readXY(buf, bytes) {
+  const st = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), enc = device.createCommandEncoder();
+  enc.copyBufferToBuffer(buf, 0, st, 0, bytes); device.queue.submit([enc.finish()]); await st.mapAsync(GPUMapMode.READ);
+  const out = new Float32Array(st.getMappedRange().slice(0)); st.unmap(); st.destroy(); return out;
+}
+// the loaded model's map as it is now: the reference every other model's map is lined up with
+function anchor() {
+  if (!MOD.anchor) { const xy = engine.pos.slice(0, data.nBase * 2); MOD.anchor = gpuXY(xy); MOD.xy.set(MODEL, xy); MOD.gpu.set(MODEL, MOD.anchor); MOD.from[MODEL] = 'loaded'; }
+  return MOD.anchor;
+}
+// model k's finished map, lined up with the loaded map (fetched and aligned once), or null when there is none
+async function mapOf(k) {
+  if (k === MODEL) anchor();
+  if (MOD.xy.has(k)) return MOD.xy.get(k);
+  const f = await findMap(SOURCE, k, SRC.rowsId, data.nBase); if (!f) return null;
+  const n = data.nBase, buf = gpuXY(f.xy), t0 = performance.now(), al = await alignBuffers(device, anchor(), buf, n, { scale: true, reflect: true });
+  const xy = await readXY(buf, n * 8);
+  MOD.xy.set(k, xy); MOD.gpu.set(k, buf); MOD.from[k] = f.from; MOD.align = { ...MOD.align, [k]: { ms: performance.now() - t0, ...al } }; return xy;
+}
+// once the map has settled: every other model's map, one at a time, so a switch never waits for the network
+async function preloadMaps() {
+  if (!switchable()) return; anchor();
+  for (const k of Object.keys(MODELS)) { if (k === MODEL) continue; try { await mapOf(k); } catch (e) { console.warn('[models] map not loaded', k, e); } await sleep(30); }
+  MOD.ready = true; modelOptions();
+}
+function modelOptions() {
+  const sel = $('textModel'), cmp = $('cmpModel'); if (!sel || !MODELS) return;
+  const have = (k) => k === MODEL || MOD.xy.has(k), tag = (k) => (have(k) || !MOD.ready ? '' : ' · not fitted yet');
+  sel.innerHTML = Object.entries(MODELS).map(([k, m]) => `<option value="${k}">${m.label}${tag(k)}</option>`).join(''); sel.value = MOD.shown;
+  if (cmp) { cmp.innerHTML = '<option value="">nothing (one map)</option>' + Object.keys(MODELS).filter((k) => k !== MOD.shown).map((k) => `<option value="${k}"${have(k) ? '' : ' disabled'}>${mshort(k)}${have(k) ? '' : ' (not fitted yet)'}</option>`).join(''); cmp.value = MOD.cmp ? MOD.cmp.right : ''; cmp.disabled = !switchable(); }
+}
+function modelNote() {
+  const A = SRC.agreement || {}, def = defaultModel(KIND), pct = (v) => `${Math.round(100 * v)}%`, one = SRC.one;
+  const parts = MOD.shown === def ? Object.entries(A).map(([k, v]) => `${mshort(k)} ${pct(v)}`) : A[MOD.shown] != null ? [`${mshort(MOD.shown)} ${pct(A[MOD.shown])}`] : [];
+  const by = KIND === 'image' ? 'by look' : 'by meaning';
+  $('modelNote').textContent = (parts.length ? `Of each ${one}'s 15 nearest neighbours ${by}, ${parts.join(', ')} ${parts.length > 1 ? 'are' : 'is'} the same as with ${mshort(def)}. ` : '') + 'Switch models, or compare two, to see how much of the map is the model\'s view.';
+}
+// the readouts that name the model of the map on screen
+function modelReadouts() {
+  if (!MODELS || !data) return; const m = MODELS[MOD.shown], shown = MOD.shown !== MODEL;
+  $('r-encoder').textContent = `${m.name} (${shown ? `its finished map, ${MOD.from[MOD.shown] === 'site' ? 'shipped with the site' : 'kept in this browser'}; this page loaded ${MODELS[MODEL].name}'s vectors` : `${data.dim} numbers per ${SRC.one}`}) · ${(SRC.rowsLoaded || 0).toLocaleString()} of ${(SRC.rowsTotal || 0).toLocaleString()} rows (?rows= to change)`;
+}
+function modelPicker() {
+  const row = $('modelRow'), sel = $('textModel'); if (!row || !sel) return;
+  row.hidden = !MODELS; if (row.hidden) return;
+  $('modelLbl').firstChild.textContent = KIND === 'image' ? 'Picture model' : 'Meaning model'; $('modelLbl').querySelector('small').textContent = KIND === 'image' ? 'image embedding' : 'text embedding';
+  modelOptions(); modelNote();
+  sel.addEventListener('change', () => switchModel(sel.value));
+  $('cmpModel')?.addEventListener('change', (e) => { if (e.target.value) compareOn(e.target.value); else compareOff(); });
+}
+// Show model k's finished map in place of the one on screen: one frame, no glide. The regions and their names are
+// worked out again for the new map (in slices, after the map is drawn).
+async function switchModel(k) {
+  const sel = $('textModel'); if (k === MOD.shown) return;
+  if (!switchable()) { reloadWith(k); return; }
+  if (tuner?.active || cast?.on || state.tuneToggling || state.castToggling) { status('Finish tuning or leave 3D first, then switch models.'); sel.value = MOD.shown; return; }
+  const t0 = performance.now(), cached = MOD.xy.has(k), xy = await mapOf(k);
+  if (!xy) { reloadWith(k); return; }
+  await tuner?.settleOff();
+  const from = MOD.shown, n = data.nBase; MOD.shown = k;
+  engine.pos.set(xy); engine.start.set(xy); engine.anchor.set(xy); device.queue.writeBuffer(engine.posBuf, 0, xy); device.queue.writeBuffer(engine.startBuf, 0, xy);
+  if (renderer.mode === 3) { renderer.mode = 0; $('mode').value = '0'; legend(); }   // how well placed reads the loaded model's lists: topic colours instead
+  if (MOD.cmp) { if (MOD.cmp.right === k) MOD.cmp.right = from; renderer.setCompare(MOD.gpu.get(MOD.cmp.right), n, MOD.cmp.x); cmpLabels(); }
+  const ch = $('chips'); state.chipsHold = true; ch.style.opacity = '0';   // the region names belong to the old map until they are worked out again
+  render(); await device.queue.onSubmittedWorkDone(); const ms = performance.now() - t0;
+  history.replaceState(null, '', urlWithModel(k)); modelOptions(); modelNote(); modelReadouts(); if (state.inspect) showInspect();
+  MOD.log.push({ from, to: k, ms: +ms.toFixed(1), fetched: !cached }); logEvent('model switch', MOD.log[MOD.log.length - 1]);
+  status(`${MODELS[k].label}: its finished map of the same ${n.toLocaleString()} ${SRC.noun}, shown in ${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms, lined up with ${mshort(MODEL)}'s so shared structure stays put`);
+  await sleep(50); await buildRegions(); state.chipsHold = false; ch.style.opacity = ''; render();
+}
+// ---- the compare: model MOD.shown's map left of a divider, model `right`'s map right of it, both lined up with the loaded map;
+// dragging the divider moves only the scissor line between them (render.js setCompare)
+function cmpLabels() { if (!MOD.cmp) return; $('cmpL').textContent = `◀ ${mshort(MOD.shown)}`; $('cmpR').textContent = `${mshort(MOD.cmp.right)} ▶`; }
+function cmpPlace() {
+  const x = MOD.cmp.x, line = $('cmpLine'); line.style.left = `${100 * x}%`; line.setAttribute('aria-valuenow', String(Math.round(100 * x)));
+  $('cmpL').style.right = `calc(${100 * (1 - x)}% + 16px)`; $('cmpR').style.left = `calc(${100 * x}% + 16px)`;
+}
+function cmpMove(x) {   // at most one draw per frame, however fast the pointer moves
+  MOD.cmp.x = Math.max(0, Math.min(1, x)); cmpPlace(); if (MOD.cmp.queued) return; MOD.cmp.queued = true;
+  requestAnimationFrame((t) => { if (!MOD.cmp) return; MOD.cmp.queued = false; renderer.compare && (renderer.compare.x = MOD.cmp.x); drawFrame(); if (MOD.cmp.dragging) MOD.cmp.frames.push(t); });
+}
+async function compareOn(k) {
+  if (!switchable()) { status('The compare needs the map of the whole table: use Full map first.'); modelOptions(); return; }
+  if (tuner?.active || cast?.on) { status('Finish tuning or leave 3D first, then compare.'); modelOptions(); return; }
+  const xy = await mapOf(k); if (!xy) { status(`No finished map of ${mshort(k)} here yet: pick it as the model once (it is fitted on your GPU), then compare.`); modelOptions(); return; }
+  MOD.cmp = { right: k, x: MOD.cmp?.x ?? 0.5, frames: [] }; renderer.setCompare(MOD.gpu.get(k), data.nBase, MOD.cmp.x);
+  $('chips').hidden = true; $('cmp').hidden = false; cmpLabels(); cmpPlace(); render(); modelOptions();
+  status(`Comparing: ${mshort(MOD.shown)}'s map left of the line, ${mshort(k)}'s right of it, the same ${data.nBase.toLocaleString()} ${SRC.noun} lined up · drag the line`);
+}
+function compareOff() { if (!MOD.cmp) return; MOD.cmp = null; renderer.setCompare(null); $('cmp').hidden = true; if (!cast?.on) $('chips').hidden = false; render(); modelOptions(); }
+function wireCompare() {
+  const line = $('cmpLine'); if (!line) return; const stage = line.closest('.stage');
+  const xOf = (e) => { const r = stage.getBoundingClientRect(); return (e.clientX - r.left) / r.width; };
+  line.addEventListener('pointerdown', (e) => { if (!MOD.cmp) return; e.preventDefault(); line.setPointerCapture(e.pointerId); MOD.cmp.dragging = true; MOD.cmp.frames = []; });
+  line.addEventListener('pointermove', (e) => { if (MOD.cmp?.dragging) cmpMove(xOf(e)); });
+  const up = () => { if (MOD.cmp) MOD.cmp.dragging = false; }; line.addEventListener('pointerup', up); line.addEventListener('pointercancel', up);
+  line.addEventListener('keydown', (e) => { if (!MOD.cmp) return; const d = e.key === 'ArrowLeft' ? -0.02 : e.key === 'ArrowRight' ? 0.02 : 0; if (d) { e.preventDefault(); cmpMove(MOD.cmp.x + d); } });
+}
+// Measurement: the divider swept across the map and back every frame for `ms`, through the same path as a drag; returns the
+// frame gaps and long tasks (jet.models.sweep(), from the console or a test)
+async function cmpSweep(ms = 3000) {
+  if (!MOD.cmp) throw new Error('compare is off'); const gaps = [], long = []; let last = 0;
+  const po = 'PerformanceObserver' in window ? new PerformanceObserver((l) => { for (const e of l.getEntries()) long.push(+e.duration.toFixed(1)); }) : null; try { po?.observe({ entryTypes: ['longtask'] }); } catch { /* not supported */ }
+  const t0 = performance.now(); MOD.cmp.dragging = true; MOD.cmp.frames = [];
+  await new Promise((res) => { const step = (t) => { const f = ((t - t0) / ms) * 2, x = f < 1 ? 0.05 + 0.9 * f : 0.95 - 0.9 * (f - 1); if (last) gaps.push(t - last); last = t; if (t - t0 >= ms) { res(); return; } cmpMove(x); requestAnimationFrame(step); }; requestAnimationFrame(step); });
+  MOD.cmp.dragging = false; po?.disconnect(); gaps.sort((a, b) => a - b);
+  return { frames: gaps.length + 1, medianMs: +gaps[gaps.length >> 1].toFixed(1), p95Ms: +gaps[Math.floor(0.95 * gaps.length)].toFixed(1), maxMs: +gaps[gaps.length - 1].toFixed(1), over25: gaps.filter((g) => g > 25).length, longTasks: long };
+}
+// "Open your own file…": the file is read here, its columns guessed (upload.js inspect), and the dialog lets the reader pick
+// the text or embedding column, a label and a date; Map it stores the file in this browser and reloads onto it
+function uploadUi() {
+  const dlg = $('uploadDlg'), input = $('uploadFile'); if (!dlg || !input) return; let pending = null;
+  const fill = (id, cols, pick, none) => { const s = $(id); s.innerHTML = (none ? `<option value="">${none}</option>` : '') + cols.map((c) => `<option>${esc(c)}</option>`).join(''); s.value = pick || ''; };
+  input.addEventListener('change', async () => {
+    const f = input.files?.[0]; input.value = ''; if (!f) return;
+    try {
+      status(`Reading ${f.name}…`); const bytes = new Uint8Array(await f.arrayBuffer()), format = formatOf(f.name), rows = await readRows(bytes, format);
+      if (!rows.length) throw new Error('no rows found'); const I = inspect(rows);
+      pending = { bytes, name: f.name.replace(/\.[^.]+$/, ''), format, rows: rows.length, info: I.info, id: `${f.name}:${f.size}:${f.lastModified}` };
+      $('up-what').textContent = `${f.name}: ${rows.length.toLocaleString()} rows, ${I.cols.length} columns. Nothing leaves this browser.`;
+      fill('up-text', I.cols, I.guess.text, '(none)'); fill('up-emb', I.cols.filter((c) => I.info[c].vecDim > 1), I.guess.embedding, '(embed the text)');
+      fill('up-label', I.cols, I.guess.label, '(none)'); fill('up-date', I.cols, I.guess.date, '(none)'); status(`${f.name}: pick the columns`); dlg.showModal();
+    } catch (err) { status(`Could not read that file (${err.message || err})`, true); }
+  });
+  $('up-cancel').addEventListener('click', () => { dlg.close(); pending = null; });
+  $('up-go').addEventListener('click', async () => {
+    if (!pending) return; const v = (id) => $(id).value || null, emb = v('up-emb'), text = v('up-text');
+    if (!emb && !text) { $('up-what').textContent = 'Pick a text column, or an embedding column.'; return; }
+    const spec = { name: pending.name, format: pending.format, rows: pending.rows, id: pending.id, text, embedding: emb, dim: emb ? pending.info[emb].vecDim : 384, label: v('up-label'), date: v('up-date') };
+    try { await putFile(pending.bytes); sessionStorage.setItem(SPEC_KEY, JSON.stringify(spec)); } catch (err) { $('up-what').textContent = `This browser would not store the file (${err.message || err})`; return; }
+    const u = new URL(location.href); for (const q of ['until', 'fresh', 'model', 'rows']) u.searchParams.delete(q); u.searchParams.set('source', 'upload'); location.href = u.toString();
+  });
+}
 function staticUi() {
-  document.body.classList.toggle('notime', noTime());
+  document.body.classList.toggle('notime', noTime()); modelPicker();
   if (!UNTIL) for (const id of ['rebuildNow', 'r-next', 'lineage-btn']) { const el = $(id); if (el) el.hidden = true; }   // nothing streams: no re-layouts, no lineage
   $('replay30').hidden = noTime() || !UNTIL; $('speed').closest('.ctl')?.setAttribute('hidden', '');
   $('replay30').textContent = 'Replay in 30 s'; $('lineage-btn').hidden = noTime() || !UNTIL;
@@ -1045,9 +1218,15 @@ function gpuCloudStart(axes, n) {
   const rb = d.createBuffer({ size: n * 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); enc.copyBufferToBuffer(xyBuf, 0, engine.startBuf, 0, n * 8); enc.copyBufferToBuffer(xyBuf, 0, rb, 0, n * 8); d.queue.submit([enc.finish()]);
   rb.mapAsync(GPUMapMode.READ).then(() => { engine.start.set(new Float32Array(rb.getMappedRange()), 0); rb.destroy(); xyBuf.destroy(); axBuf.destroy(); uBuf.destroy(); });
 }
+function makeTuner() {
+  if (!tuner) tuner = new TuneMode({ device: engine.device, engine, data, renderer, state, $, drawFrame, status, staticMap: !!SRC.static, get cast() { return cast; }, rebuild: (why) => doRebuild(why),
+    rebuildRegions: () => { buildRegions(); render(); }, shrinkRegions: () => shrinkRegions() });
+  return tuner;
+}
 function staticDone() {
   const fitS = (data.fit.ms / 1000).toFixed(1);
   if (UNTIL) status(`Map of the ${data.nBase.toLocaleString()} ${SRC.noun} up to ${tLabelDate(UNTIL)}, fitted in ${fitS} s · Play places the other ${(data.n - data.nBase).toLocaleString()} (Batched RevAdopt) · Full map returns to all ${data.n.toLocaleString()}`);
+  else if (data.fit.kept) status(`${data.n.toLocaleString()} ${SRC.noun}: the ${MODELS[MODEL].label} map that was on screen, now with its own vectors`);
   else status(`${data.n.toLocaleString()} ${SRC.noun}, one map fitted on this GPU in ${fitS} s${SRC.timeAxis ? ' · drag back along the timeline to fit the map at an earlier date and play forward from there' : ''}`);
 }
 // the date a rewind would fit up to: the end of the time unit under T (the whole month or year)
@@ -1105,8 +1284,9 @@ async function freshCollect(minutes, device) {   // minutes may shrink for a sou
       const m = ev.data;
       if (m.type === 'progress') status(`Loading the encoder… ${m.pct?.toFixed(0) ?? ''} %`);
       else if (m.type === 'note') status(m.msg);
+      else if (m.type === 'lists') col.lists = m;   // neighbour lists shipped with the dataset (arXiv): the fit searches nothing
       else if (m.type === 'peek') staticPeek(col, m);
-      else if (m.type === 'ready') { if (m.dim) { SRC.dim = dim = m.dim; SRC.model = m.model; SRC.rowsLoaded = m.rows; SRC.rowsTotal = m.total; } if (m.baseEndUs) { tickerStop(); col.baseEndUs = m.baseEndUs; SRC.timeAxis = m.timeAxis; SRC.timeSpan = minutes * 60; SRC.colors = m.colors; SRC.categoryName = m.categoryName; } col.liveStartUs = m.liveStartUs; $('r-live').textContent = `in-browser: ${SRC.feed} direct, ${m.hf} on ${m.device} (loaded in ${(m.loadMs / 1000).toFixed(1)} s)`; status(col.fromCache ? `Fetching ${((nowUs - resumeUs) / 60e6).toFixed(0)} min since the last visit…` : `Fetching the last ${minutes} min…`); }
+      else if (m.type === 'ready') { SRC.agreement = m.agreement || null; SRC.rowsId = m.rowsId || null; if (m.dim) { SRC.dim = dim = m.dim; SRC.model = m.model; SRC.rowsLoaded = m.rows; SRC.rowsTotal = m.total; } if (m.baseEndUs) { tickerStop(); col.baseEndUs = m.baseEndUs; SRC.timeAxis = m.timeAxis; SRC.timeSpan = minutes * 60; SRC.colors = m.colors; SRC.categoryName = m.categoryName; } col.liveStartUs = m.liveStartUs; $('r-live').textContent = `in-browser: ${SRC.feed} direct, ${m.hf} on ${m.device} (loaded in ${(m.loadMs / 1000).toFixed(1)} s)`; status(col.fromCache ? `Fetching ${((nowUs - resumeUs) / 60e6).toFixed(0)} min since the last visit…` : `Fetching the last ${minutes} min…`); }
       else if (m.type === 'frame') { if (col.db) writeFrame(col.db, m.hdr, m.vecs); const was = col.done; onFrame(m); if (!was && col.done) resolve(col); }
       else if (m.type === 'backfilled' && SRC.static && !col.done) { col.done = true; resolve(col); }   // every row is in the base map
       else if (m.type === 'stats') { state.liveStats = { stats: m.stats, device: 'webgpu' }; }
@@ -1114,7 +1294,7 @@ async function freshCollect(minutes, device) {   // minutes may shrink for a sou
       else if (m.type === 'error') { w.terminate(); state.worker = null; reject(new Error('In-browser source failed: ' + m.msg)); }
     };
     w.onerror = (e) => { w.terminate(); state.worker = null; reject(new Error('In-browser source failed: ' + (e.message || 'worker error'))); };
-    w.postMessage({ type: 'start', source: SOURCE, relay: SRC.static ? SOURCE : SRC.recorded || RELAY, rows: SRC.rows, untilMs: UNTIL, export: params.get('export') === '1' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname), gpu: params.get('gpu') !== '0', backfillMinutes: minutes, cursorUs, liveStartUs: nowUs, resumeUs, baseMinutes: (col.baseEndUs - cursorUs) / 60e6, batchSeconds: 0.25, embedChunk: +(params.get('chunk') || 32), device: params.get('device') || 'webgpu' });
+    w.postMessage({ type: 'start', source: SOURCE, relay: SRC.static ? SOURCE : SRC.recorded || RELAY, rows: SRC.rows, untilMs: UNTIL, model: MODEL, upload: UPLOAD, export: params.get('export') === '1' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname), gpu: params.get('gpu') !== '0', backfillMinutes: minutes, cursorUs, liveStartUs: nowUs, resumeUs, baseMinutes: (col.baseEndUs - cursorUs) / 60e6, batchSeconds: 0.25, embedChunk: +(params.get('chunk') || 32), device: params.get('device') || 'webgpu' });
   });
 }
 // ---- While a static dataset embeds: the vectors coming out (a thinned sample) appear as dots on their first two principal
@@ -1244,11 +1424,23 @@ async function freshBuild(device, col, cap) {
   let init = null; if (SRC.static && col.pvLoopP) init = (idx, nB) => previewSeed(col, idx, nB, feat, dim); else if (col.axes && col.previewN === all.length) { init = new Float32Array(nBase * 2); orig.forEach((i, r) => { init[2 * r] = col.previewXY[2 * i]; init[2 * r + 1] = col.previewXY[2 * i + 1]; }); } else if (col.axes) { init = pcaProject(feat, nBase, dim, col.axes, 3.0); }
   let fit;
   if (TUNED_ERR) throw TUNED_ERR;
-  if (TUNED) {   // the live map's lists for placement (fitBase with no layout steps), then the tuner's layout
+  // a map of the whole table under a model with a picker: kept in this browser after the fit (maps.js), so switching back to
+  // this model later is instant; a reload asked for by a model-dependent control shows the map that was on screen instead
+  const whole = !!(SRC.static && MODELS && !UNTIL && !TUNED && !HANDOFF && SRC.rowsId && nBase === all.length), kept = whole ? await keptMap(nBase) : null;
+  if (kept) {
+    const lists = await StreamingEngine.fitBase(device, feat, nBase, dim, { a: A, b: B, steps: 0, init: kept.xy, lists: col.lists && nBase === col.lists.n ? col.lists : null, onProgress: (m) => status(`The map that was on screen (${m})…`) });
+    fit = { ...lists, xy: kept.xy, steps: 0, kept: true };
+  } else if (TUNED) {   // the live map's lists for placement (fitBase with no layout steps), then the tuner's layout
     const lists = await StreamingEngine.fitBase(device, feat, nBase, dim, { a: A, b: B, steps: 0, init: new Float32Array(nBase * 2), onProgress: (m) => status(`Fitting the base map (${m})…`) });
     const t = await tunedLayout(device, feat, nBase, dim, TUNED, (m) => status(`Fitting the tuned base map (${m})…`));
     fit = { ...lists, xy: t.xy, steps: TUNED.epochs, edges: t.edges, ms: lists.ms + t.ms, tuned: tunedToParam(TUNED) };
-  } else fit = await StreamingEngine.fitBase(device, feat, nBase, dim, { a: A, b: B, steps: 1500, lr: init ? 0.05 : 0.1, negScale: 6, init, onProgress: (m) => status(SRC.static ? `Fitting the map of ${nBase.toLocaleString()} ${SRC.noun} (${m.replace('base fit: ', '')})…` : `Fitting the base map (${m})…`) });
+  } else fit = await StreamingEngine.fitBase(device, feat, nBase, dim, { a: A, b: B, steps: 1500, lr: init ? 0.05 : 0.1, negScale: 6, init, lists: col.lists && nBase === col.lists.n && orig.every((i, r) => i === r) ? col.lists : null, onProgress: (m) => status(SRC.static ? `Fitting the map of ${nBase.toLocaleString()} ${SRC.noun} (${m.replace('base fit: ', '')})…` : `Fitting the base map (${m})…`) });
+  if (col.lists && nBase === col.lists.n) state.shippedLists = col.lists;   // the tuner and keep settling use them too
+  if (whole && !kept) {
+    const meta = { modelName: MODELS[MODEL].name, fitMs: Math.round(fit.ms), steps: fit.steps, edges: fit.edges, fittedAt: new Date().toISOString() };
+    keepMap(SOURCE, MODEL, SRC.rowsId, fit.xy, meta);
+    if (params.get('exportmap') === '1' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) await exportMap(SOURCE, MODEL, SRC.rowsId, fit.xy, meta);   // for the site (build_site.py)
+  }
   const basePosts = orig.map(i => ({ text: all[i].text, terms: all[i].terms, icao24: all[i].icao24, tags: all[i].tags || [], reply: 0, url: all[i].url, kind: all[i].kind, img: all[i].img, cat: all[i].cat, score: all[i].score, descendants: all[i].descendants }));
   let lab, named;
   if (SRC.static && all.some((p) => p.cat !== undefined)) {
@@ -1357,42 +1549,48 @@ function wireTabs() {
   let saved = null; try { saved = localStorage.getItem('jet.tab'); } catch {} pick(tabs.some((t) => t.dataset.tab === saved) ? saved : 't-look');
 }
 function wireSource() {
-  wireTabs();
+  wireTabs(); wireCompare();
   // 3D: cast the map into three dimensions and back at any time (cast3d.js); the 2D live map keeps running underneath
   $('view3d')?.addEventListener('click', async (e) => {
     e.preventDefault(); if (!data?.baseXY || !engine || state.castToggling) return;
     const a = e.currentTarget; if (tuner?.active) { status('Finish tuning first (Done tuning), then cast into 3D.'); return; }
+    if (!cast?.on && needsLoaded('The 3D view')) return; if (MOD.cmp) compareOff();
     state.castToggling = true; a.setAttribute('aria-busy', 'true');
     try {
       if (!cast) cast = new Cast3D({ device: engine.device, engine, data, renderer, state, canvas: $('map3d'), gizmoEl: $('gizmo3d'), status, staticMap: !!SRC.static });
-      if (!cast.on) { $('chips').hidden = true; a.textContent = '2D'; await cast.enter(); }
+      if (!cast.on) { await tuner?.settleOff(); $('chips').hidden = true; a.textContent = '2D'; await cast.enter(); }
       else {
         const { changed } = await cast.exit(); $('chips').hidden = false; a.textContent = '3D';
         if (changed) {   // the 2D map is now the 3D map as it was seen: regions, map lists and readouts follow (one quiet rebuild if anything has arrived)
           data.baseMeta.handoff = { kind: 'flattened from the 3D view', settings: tuner?.P3 ? tunedToParam(tuner.P3) : null }; if (!/tuned base/.test($('h1sub').textContent)) $('h1sub').textContent += ' · tuned base';
           render(); if (engine.n > data.nBase) await doRebuild('3D view'); else { buildRegions(); render(); }
-          status('Back in 2D: the map as it was seen in 3D');
+          status('Clusters moved: back in 2D, the map is now the 3D map flattened as it was seen');
         } else { render(); status('Back in 2D'); }
       }
     } catch (err) { console.error(err); status(`3D failed: ${err.message || err}`, true); $('map3d').hidden = true; $('chips').hidden = false; a.textContent = '3D'; if (cast) cast.on = false; }
     finally { state.castToggling = false; a.removeAttribute('aria-busy'); }
   });
   // Base map tuner: a mode of this page, on this map (tunemode.js). The button toggles it; the map never leaves the screen.
+  // Keep settling (tunemode.js): the fit keeps running at a small constant learning rate whenever nothing else moves the map
+  { const q = new URLSearchParams(location.search).get('settle'); state.keepSettling = q != null && q !== '0'; if (q && +q > 0 && +q !== 1) state.settleLr = +q; if ($('keepSettling')) $('keepSettling').checked = state.keepSettling; }   // off unless asked for (?settle=1, or ?settle=0.06 for that learning-rate share): the map stays still
+  setInterval(() => { if (state.keepSettling && MOD.shown === MODEL && !MOD.cmp && data?.baseXY && engine && !state.tuneToggling && !state.castToggling && !LOAD.on) makeTuner().settleOn().catch((e) => console.warn('[jet] keep settling', e)); }, 1000);
+  $('keepSettling')?.addEventListener('change', (e) => { if (e.target.checked && needsLoaded('Keep settling')) return; state.keepSettling = e.target.checked; if (!state.keepSettling) tuner?.settleOff(); });
   $('tunerLink')?.addEventListener('click', async (e) => {
     e.preventDefault(); if (!data?.baseXY || !engine || state.tuneToggling || state.castToggling) return;
     const a = e.currentTarget;   // before any await: the event's currentTarget is cleared once dispatch ends
+    if (!tuner?.active && needsLoaded('The base map tuner')) return; if (MOD.cmp) compareOff();
     state.tuneToggling = true; a.setAttribute('aria-busy', 'true');
     try {
-      if (!tuner) tuner = new TuneMode({ device: engine.device, engine, data, renderer, state, $, drawFrame, status, staticMap: !!SRC.static, get cast() { return cast; }, rebuild: (why) => doRebuild(why),
-        rebuildRegions: () => { buildRegions(); render(); }, shrinkRegions: () => shrinkRegions() });
+      makeTuner();
       if (!tuner.active) { if (renderer.mode === 6 && !cast?.on) { state.modeBeforeTune = 6; renderer.mode = 0; } await tuner.enter(); a.textContent = 'Done tuning'; }   // dots coloured by region would turn grey with no regions: topic colours while tuning
       else { const was3 = !!tuner.d3; if (state.modeBeforeTune != null) { renderer.mode = state.modeBeforeTune; state.modeBeforeTune = null; } await tuner.exit(); tuner.hide(); a.textContent = 'Base map tuner'; if (was3) { status('3D tuning done · 2D keeps it'); return; } if (tuner.everMoved) { data.baseMeta.handoff = { kind: 'tuned in the live map', settings: tunedToParam(tuner.P) + `_rs${tuner.P.restart}` }; if (!/tuned base/.test($('h1sub').textContent)) $('h1sub').textContent += ' · tuned base'; } status('Base map tuned'); }
     } catch (err) { console.error(err); status(`Tuning failed: ${err.message || err}`, true); }
     finally { state.tuneToggling = false; a.removeAttribute('aria-busy'); }
   });
-  if (!RECORDED) for (const [k, D] of Object.entries(DATASETS)) $('srcDatasets').appendChild(new Option(D.label, k));
+  if (!RECORDED) for (const k of [...MENU_ORDER.filter((k) => DATASETS[k]), ...Object.keys(DATASETS).filter((k) => !MENU_ORDER.includes(k))]) $('srcDatasets').appendChild(new Option(DATASETS[k].label + (LOAD_S[k] ? ` · about ${LOAD_S[k]} s` : ''), k));   // quickest and most worth a look first
+  if (!RECORDED) { $('srcDatasets').appendChild(new Option('Open your own file…', '__upload')); uploadUi(); }
   if (RECORDED) { const sel = $('livesrc'); sel.innerHTML = ''; for (const [k, r] of Object.entries(RECORDED.sources)) sel.add(new Option(r.label, k, false, k === REC_KEY)); sel.addEventListener('change', () => { location.hash = sel.value; }); sel.closest('.ctl').querySelector('.lbl').textContent = 'Recording'; $('golive').hidden = true; }
-  else { $('livesrc').value = state.liveSource; } if (SRC.static) { for (const id of ['golive', 'play', 'replay30']) $(id).hidden = true; $('speed').closest('.ctl')?.setAttribute('hidden', ''); if (UNTIL) $('play').hidden = $('fullmap').hidden = false; }   /* nothing to play while it loads; staticReady shows Replay for a dated table */ if (!RECORDED) $('livesrc').addEventListener('change', (e) => { const v = e.target.value; if (FRESH && v !== 'relay') { const u = new URL(location.href); if (v === 'browser') u.searchParams.delete('source'); else u.searchParams.set('source', v); for (const q of ['fresh', 'base', 'tuned', 'rows', 'cap', 'until']) u.searchParams.delete(q); location.href = u.toString(); return; } state.liveSource = v === 'relay' ? 'relay' : 'browser'; });
+  else { $('livesrc').value = state.liveSource; } if (SRC.static) { for (const id of ['golive', 'play', 'replay30']) $(id).hidden = true; $('speed').closest('.ctl')?.setAttribute('hidden', ''); if (UNTIL) $('play').hidden = $('fullmap').hidden = false; }   /* nothing to play while it loads; staticReady shows Replay for a dated table */ if (!RECORDED) $('livesrc').addEventListener('change', (e) => { const v = e.target.value; if (v === '__upload') { e.target.value = SOURCE; $('uploadFile').click(); return; } if (FRESH && v !== 'relay') { const u = new URL(location.href); if (v === 'browser') u.searchParams.delete('source'); else u.searchParams.set('source', v); for (const q of ['fresh', 'base', 'tuned', 'rows', 'cap', 'until']) u.searchParams.delete(q); location.href = u.toString(); return; } state.liveSource = v === 'relay' ? 'relay' : 'browser'; });
   sourcePicker();
 }
 function wire() {
@@ -1440,12 +1638,12 @@ function wire() {
   $('fitbar-go').addEventListener('click', () => goUntil(+$('fitbar').dataset.until));
   $('fitbar-no').addEventListener('click', () => { $('fitbar').hidden = true; state.rewindT = null; drawTimeline(); });
   $('fullmap').addEventListener('click', () => goUntil(0));
-  $('play').addEventListener('click', () => setPlaying(!state.playing));
+  $('play').addEventListener('click', async () => { if (!state.playing) await tuner?.settleOff(); setPlaying(!state.playing); });   // keep settling hands its map over first
   $('step').addEventListener('click', () => { if (state.playing) setPlaying(false); stepOnce(); });
   $('golive').addEventListener('click', goLive);
   $('reset').addEventListener('click', resetToBase); wireTail();
 }
-async function resetToBase() { if (state.playing) setPlaying(false); engine.reset(); renderer.updateLabels(0, data.N); await engine.baseRanksReady; scores.fill(0); state.placeBins.clear(); state.ledgerLog = []; state.lastWave = null; state.rebuildMarks = []; state.lastRebuildClock = data.baseSeconds; state.lastRebuildPlayed = playedNow(); recomputeScores(0); updateBaseP5(); applyThreshold(); state.cumulativeMs = 0; state.log = []; state.lastStats = null; setClock(data.baseSeconds); state.achieved = 0; renderer.resetAppear(); state.countFrom = data.baseSeconds; if (view.on) viewExit(); snapClear(); regionHist.clear(); state.histMinute = -1; if (regions) { for (const r of regions.regions) { r.count = r.countBase; r.arr = 0; } regionS.fill(-1); assignRegions(0, data.nBase); regionRates(); recordHistory('base'); showRegion(); } snapOpen('base'); updateReadouts(null); render(); drawTimeline(); legend(); $('play').textContent = playLabel(); status('Back to the starting map.'); }
+async function resetToBase() { if (state.playing) setPlaying(false); await tuner?.settleOff(); engine.reset(); renderer.updateLabels(0, data.N); await engine.baseRanksReady; scores.fill(0); state.placeBins.clear(); state.ledgerLog = []; state.lastWave = null; state.rebuildMarks = []; state.lastRebuildClock = data.baseSeconds; state.lastRebuildPlayed = playedNow(); recomputeScores(0); updateBaseP5(); applyThreshold(); state.cumulativeMs = 0; state.log = []; state.lastStats = null; setClock(data.baseSeconds); state.achieved = 0; renderer.resetAppear(); state.countFrom = data.baseSeconds; if (view.on) viewExit(); snapClear(); regionHist.clear(); state.histMinute = -1; if (regions) { for (const r of regions.regions) { r.count = r.countBase; r.arr = 0; } regionS.fill(-1); assignRegions(0, data.nBase); regionRates(); recordHistory('base'); showRegion(); } snapOpen('base'); updateReadouts(null); render(); drawTimeline(); legend(); $('play').textContent = playLabel(); status('Back to the starting map.'); }
 function wireTail() {
   $('speed').addEventListener('input', (e) => { state.speed = +e.target.value; $('speedv').textContent = state.speed; });
   $('interval').addEventListener('change', (e) => { state.interval = +e.target.value; state.worker?.postMessage({ type: 'batch', batchSeconds: Math.min(state.interval, 5) }); });
@@ -1456,7 +1654,7 @@ function wireTail() {
   $('leash').addEventListener('input', (e) => { state.leash = +e.target.value; $('leashv').textContent = e.target.value; });
   $('morphMs').addEventListener('input', (e) => { state.morphMs = 1000 * +e.target.value; $('morphv').textContent = e.target.value; });
   $('budget').value = state.budget; $('budget').addEventListener('change', (e) => { state.budget = Math.max(0, +e.target.value || 0); });
-  $('mode').addEventListener('change', (e) => { renderer.mode = +e.target.value; legend(); render(); });
+  $('mode').addEventListener('change', (e) => { if (e.target.value === '3' && needsLoaded('Colouring by how well placed')) return; renderer.mode = +e.target.value; legend(); render(); });
   $('settleMs').addEventListener('input', (e) => { state.settleMs = +e.target.value; $('settlev').textContent = e.target.value; });
   $('boost').addEventListener('input', (e) => { renderer.arrivalBoost = +e.target.value; $('boostv').textContent = e.target.value; render(); });
   $('recent').addEventListener('input', (e) => { renderer.recentWindow = +e.target.value; $('recentv').textContent = e.target.value; render(); });
@@ -1544,8 +1742,8 @@ async function main() {
         const ch = $('chips'); state.chipsHold = true; ch.style.opacity = '0';
         loadStep(3); crossfadeToken++; state.morphing = true; renderer.settle = 0; renderer.rmix = 0; drawFrame(); $('map').style.visibility = ch.style.visibility = ''; $('preview').hidden = true;
         glide(2500, (e) => { renderer.view.cx = from.cx + (target.cx - from.cx) * e; renderer.view.cy = from.cy + (target.cy - from.cy) * e; renderer.view.scale = from.scale + (target.scale - from.scale) * e; }).then(() => {
-          loadDone(); state.chipsHold = false; render(); ch.style.transition = 'opacity .45s ease'; requestAnimationFrame(() => { ch.style.opacity = ''; }); setTimeout(() => { ch.style.transition = ''; }, 600); if (SRC.static) staticDone(); if (UNTIL) engine.ledgerReady; });   // a rewound map: Play's placement needs the ledger; started once the glide is over
-      } else { $('map').style.visibility = $('chips').style.visibility = ''; $('preview').hidden = true; loadDone(); if (SRC.static) staticDone(); }
+          loadDone(); state.chipsHold = false; render(); ch.style.transition = 'opacity .45s ease'; requestAnimationFrame(() => { ch.style.opacity = ''; }); setTimeout(() => { ch.style.transition = ''; }, 600); if (SRC.static) { staticDone(); preloadMaps(); } if (UNTIL) engine.ledgerReady; });   // a rewound map: Play's placement needs the ledger; started once the glide is over
+      } else { $('map').style.visibility = $('chips').style.visibility = ''; $('preview').hidden = true; loadDone(); if (SRC.static) { staticDone(); preloadMaps(); } }
       if (HANDOFF?.view) { Object.assign(renderer.view, viewFrom(HANDOFF.view, renderer.canvas.getBoundingClientRect())); render(); }   // the tuner's view, unchanged
       dropSnapshot();   // this page's own map is drawn: the previous page's picture fades out
       if (!SRC.static) status(HANDOFF ? `Base map from the tuner · ${(data.n - data.nBase).toLocaleString()} arriving` : `Base map fitted · ${(data.n - data.nBase).toLocaleString()} arriving`);
@@ -1558,7 +1756,7 @@ async function main() {
       $('r-filter').textContent = filterText(cs);
       loadStep(3); loadDone(); status('Ready');
     }
-    window.jet = { get tuner() { return tuner; }, get cast() { return cast; }, get regionPrevS() { return regionPrevS; }, engine, renderer, data, state, events, stepOnce, runTo, get scores() { return scores; }, flushPending, drawFrame, displayClock, kickAnim, parity, strandedCurve, enforceBudget, compactAll, doRebuild, requestRebuild, get regions() { return regions; }, buildRegions, regionRates, regionSpark, regionHist, showRegion, setFocus, render, layoutChips, snaps, get live() { return live; }, view, viewTo, viewExit, viewFinish, timelapse, snapBytes, setFooter, drawLineage, lineage };
+    window.jet = { models: { state: MOD, switchModel, compareOn, compareOff, sweep: cmpSweep }, get tuner() { return tuner; }, get cast() { return cast; }, get regionPrevS() { return regionPrevS; }, engine, renderer, data, state, events, stepOnce, runTo, get scores() { return scores; }, flushPending, drawFrame, displayClock, kickAnim, parity, strandedCurve, enforceBudget, compactAll, doRebuild, requestRebuild, get regions() { return regions; }, buildRegions, regionRates, regionSpark, regionHist, showRegion, setFocus, render, layoutChips, snaps, get live() { return live; }, view, viewTo, viewExit, viewFinish, timelapse, snapBytes, setFooter, drawLineage, lineage };
   } catch (e) { console.error(e); status('Error: ' + e.message, true); }
 }
 main();

@@ -7,7 +7,9 @@
 // history neighbours, Jacobi rounds with the base fixed), on the GPU, again whenever rows arrive.
 //
 // A static dataset's map (every row fitted at once) gets a full 3D UMAP fit by default: all three coordinates of every row,
-// from the 2D map plus a little depth, no leash. ?lift=depth gives the depth-only lift instead.
+// no leash. It starts from the 2D map with each row's depth its place along the third principal axis of the vectors
+// (scaled to the 2D map's spread), and runs the main fit's optimiser: Adam, repulsion 6, 500 steps (WGSL_ADAM3).
+// ?lift=depth gives the depth-only lift instead.
 // Opt-in elsewhere, ?lift=free (or cast.liftMode = 'free' before entering): all three coordinates are fitted, each row's x and y
 // leashed to its 2D place (a pull of LEASH x the offset per epoch, scaled by the learning rate), so the top view stays
 // close to the 2D map but not identical; groups the 2D map laid on top of each other can then move apart sideways as well
@@ -65,6 +67,41 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   if (U.leash > 0.0) { let a2 = vec2<f32>(anchor[3u * i], anchor[3u * i + 1u]); let pull = clamp(U.leash * (a2 - yi.xy), vec2<f32>(-4.0), vec2<f32>(4.0)) * U.alpha; yi = vec3<f32>(yi.xy + pull, yi.z); }
   ynext[3u * i] = yi.x; ynext[3u * i + 1u] = yi.y; ynext[3u * i + 2u] = yi.z;
+}`;
+// the full 3D fit of a static map: kernels.js WGSL_REBUILD (the main fit's Adam step: every fuzzy edge each step, five
+// negatives scaled by gamma, gradient clipped) in three dimensions, with the five negatives drawn by hash and redrawn every
+// 8 steps as fitBase redraws them
+const FIT3 = { steps: 500, lr: 0.05, gamma: 6, clip: 4, negEvery: 8 };
+const WGSL_ADAM3 = WGSL_HASH + /* wgsl */`
+struct P { n: u32, step: u32, negSeed: u32, pad0: u32, a: f32, b: f32, lr: f32, gamma: f32, clip: f32, beta1: f32, beta2: f32, eps: f32 };
+@group(0) @binding(0) var<uniform> U: P;
+@group(0) @binding(1) var<storage, read> off: array<u32>;
+@group(0) @binding(2) var<storage, read> idx: array<u32>;
+@group(0) @binding(3) var<storage, read> ew: array<f32>;
+@group(0) @binding(4) var<storage, read> ycur: array<f32>;
+@group(0) @binding(5) var<storage, read_write> ynext: array<f32>;
+@group(0) @binding(6) var<storage, read_write> adam: array<f32>;   // per row: m.xyz, v.xyz
+fn at(i: u32) -> vec3<f32> { return vec3<f32>(ycur[3u * i], ycur[3u * i + 1u], ycur[3u * i + 2u]); }
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x; if (i >= U.n) { return; }
+  let yi = at(i); var g = vec3<f32>(0.0);
+  for (var e: u32 = off[i]; e < off[i + 1u]; e = e + 1u) {
+    let d = yi - at(idx[e]); let d2 = max(dot(d, d), 1e-12); let p = pow(d2, U.b);
+    g = g + ew[e] * (2.0 * U.a * U.b * p / (d2 * (1.0 + U.a * p))) * d;
+  }
+  let h0 = pcg(i ^ pcg(U.negSeed * 2654435761u + 0x51ed27u));
+  for (var s: u32 = 0u; s < 5u; s = s + 1u) {
+    var k = pcg(h0 + 0x9e3779b9u * (s + 1u)) % U.n; if (k == i) { k = (k + 1u) % U.n; }
+    let d = yi - at(k); let d2 = max(dot(d, d), 1e-12); let p = pow(d2, U.b);
+    g = g - U.gamma * (2.0 * U.b / ((0.001 + d2) * (1.0 + U.a * p))) * d;
+  }
+  let gn = length(g); if (gn > U.clip) { g = g * (U.clip / gn); }
+  var m = vec3<f32>(adam[6u * i], adam[6u * i + 1u], adam[6u * i + 2u]); var v = vec3<f32>(adam[6u * i + 3u], adam[6u * i + 4u], adam[6u * i + 5u]);
+  m = U.beta1 * m + (1.0 - U.beta1) * g; v = U.beta2 * v + (1.0 - U.beta2) * g * g;
+  let t = f32(U.step + 1u); let y = yi - U.lr * (m / (1.0 - pow(U.beta1, t))) / (sqrt(v / (1.0 - pow(U.beta2, t))) + U.eps);
+  ynext[3u * i] = y.x; ynext[3u * i + 1u] = y.y; ynext[3u * i + 2u] = y.z;
+  adam[6u * i] = m.x; adam[6u * i + 1u] = m.y; adam[6u * i + 2u] = m.z; adam[6u * i + 3u] = v.x; adam[6u * i + 4u] = v.y; adam[6u * i + 5u] = v.z;
 }`;
 // arrivals: one Jacobi round of the fuzzy-weighted mean of their history neighbours; zOnly = 1 sets only their depth;
 // zOnly = 2 (free lift) sets depth to that mean and x, y to the row's own 2D place plus its neighbours' mean shift from theirs
@@ -144,7 +181,7 @@ export class Cast3D {
   constructor(ctx) {
     this.ctx = ctx; this.on = false; this.fit = null; this.glide = 1; this.collapse = 0; this.changed = false; this.liftMode = LIFT_PARAM || (ctx.staticMap ? 'free' : 'depth'); this.leash = !LIFT_PARAM && ctx.staticMap ? 0 : LEASH;   // a static map: a full 3D fit of every row (no leash); ?lift= chooses
     const d = ctx.device, mk = (code) => d.createComputePipeline({ layout: 'auto', compute: { module: d.createShaderModule({ code }), entryPoint: 'main' } });
-    this.pSgd = mk(WGSL_SGD3); this.pPlace = mk(WGSL_PLACE3); this.pProject = mk(WGSL_PROJECT);
+    this.pSgd = mk(WGSL_SGD3); this.pAdam = mk(WGSL_ADAM3); this.pPlace = mk(WGSL_PLACE3); this.pProject = mk(WGSL_PROJECT);
     const UB = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST; this.uSgd = d.createBuffer({ size: 48, usage: UB }); this.uPlace = d.createBuffer({ size: 16, usage: UB }); this.uProject = d.createBuffer({ size: 48, usage: UB }); this.uDraw = d.createBuffer({ size: 128, usage: UB });
     const N = ctx.data.N, S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, b = (bytes) => d.createBuffer({ size: bytes, usage: S });
     this.posA = b(N * 12); this.posB = b(N * 12); this.posW = b(N * 12); this.prev = b(N * 12); this.ref = b(N * 12); this.flatStart = b(N * 12); this.labBuf = b(N * 4);
@@ -177,6 +214,55 @@ export class Cast3D {
     }
     await device.queue.onSubmittedWorkDone();
   }
+  // the full 3D fit of a static map: FIT3's Adam steps over the base rows from y0 (x, y, depth per row) into posW, the
+  // learning rate decaying to zero as in fitBase; 8 steps per submission, each with its own uniforms
+  async runAdam(y0, s) {
+    const { device, data } = this.ctx, nb = data.nBase, G = this.fit.graph, ab = findAB(Math.min(s.minDist, s.spread), s.spread), q = device.queue;
+    if (!this.adamBuf) { this.adamBuf = device.createBuffer({ size: data.N * 24, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }); this.uAdam = Array.from({ length: 8 }, () => device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })); }
+    q.writeBuffer(this.posW, 0, y0, 0, nb * 3); { const enc = device.createCommandEncoder(); enc.clearBuffer(this.adamBuf); q.submit([enc.finish()]); }
+    const groups = [this.posW, this.posB].map((cur, c) => this.uAdam.map((ub) => device.createBindGroup({ layout: this.pAdam.getBindGroupLayout(0), entries: [ub, G.off, G.idx, G.w, cur, c ? this.posW : this.posB, this.adamBuf].map((x, i) => ({ binding: i, resource: { buffer: x } })) })));
+    const steps = FIT3.steps & ~1;   // even: the result ends in posW
+    for (let g0 = 0; g0 < steps; g0 += 8) {
+      const enc = device.createCommandEncoder();
+      for (let st = g0; st < Math.min(steps, g0 + 8); st++) {
+        const buf = new ArrayBuffer(48), u = new Uint32Array(buf), f = new Float32Array(buf);
+        u[0] = nb; u[1] = st; u[2] = 1 + Math.floor(st / FIT3.negEvery); f[4] = ab.a; f[5] = ab.b; f[6] = FIT3.lr * (1 - st / steps); f[7] = FIT3.gamma; f[8] = FIT3.clip; f.set([0.9, 0.999, 1e-8], 9);
+        q.writeBuffer(this.uAdam[st % 8], 0, buf);
+        const p = enc.beginComputePass(); p.setPipeline(this.pAdam); p.setBindGroup(0, groups[st % 2][st % 8]); p.dispatchWorkgroups(Math.ceil(nb / 64)); p.end();
+      }
+      q.submit([enc.finish()]); await q.onSubmittedWorkDone();
+    }
+  }
+  // each base row's place along the third principal axis of its vectors, once per dataset: the axes by LiveFit.pcaInit's
+  // power iteration on the GPU (each axis deflated against the ones before) over every s-th row, at most PC_ROWS of them
+  // (its per-dimension kernel loops over all rows it is given: over 163,749 wine reviews the 90 rounds held the GPU 5.5 s),
+  // then every row projected onto the third axis
+  async thirdAxis() {
+    if (this.pc3) return this.pc3;
+    const F = this.fit, { n, dim, device } = F, S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, PC_ROWS = 16384;
+    const st = Math.ceil(n / PC_ROWS), ns = Math.ceil(n / st), sf = new Float32Array(ns * dim);
+    for (let r = 0; r < ns; r++) sf.set(F.feat.subarray(r * st * dim, (r * st + 1) * dim), r * dim);
+    const fs = F.buf(sf.byteLength, S); device.queue.writeBuffer(fs, 0, sf);
+    const mean = F.buf(dim * 4, S), v = F.buf(dim * 4, S), us = F.buf(ns * 4, S), u = F.buf(n * 4, S), w = F.buf(dim * 4, S), uni = F.buf(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST), uniAll = F.buf(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    device.queue.writeBuffer(uni, 0, new Uint32Array([ns, dim, 0, 0])); device.queue.writeBuffer(uniAll, 0, new Uint32Array([n, dim, 0, 0]));
+    F.run('meanCols', F.bind('meanCols', [uni, fs, mean]), Math.ceil(dim / 64));
+    const gP = F.bind('proj', [uni, fs, mean, v, us]), gB = F.bind('back', [uni, fs, mean, us, w]);
+    let r = 7; const rnd = () => { r = (r + 0x6d2b79f5) >>> 0; let t = Math.imul(r ^ (r >>> 15), 1 | r); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const comps = [], deflate = (x) => { for (const p of comps) { let dt = 0; for (let d = 0; d < dim; d++) dt += x[d] * p[d]; for (let d = 0; d < dim; d++) x[d] -= dt * p[d]; } };
+    for (let c = 0; c < 3; c++) {
+      let vv = new Float64Array(dim); for (let d = 0; d < dim; d++) vv[d] = rnd() - 0.5;
+      for (let it = 0; it < 30; it++) {
+        deflate(vv); device.queue.writeBuffer(v, 0, Float32Array.from(vv)); F.run('proj', gP, Math.ceil(n / 64)); F.run('back', gB, Math.ceil(dim / 64));
+        const ww = Float64Array.from(await F.read(w, dim * 4)); deflate(ww);
+        let nrm = 0; for (let d = 0; d < dim; d++) nrm += ww[d] * ww[d]; nrm = Math.sqrt(nrm) || 1; for (let d = 0; d < dim; d++) vv[d] = ww[d] / nrm;
+      }
+      comps.push(vv);
+    }
+    device.queue.writeBuffer(v, 0, Float32Array.from(comps[2])); F.run('proj', F.bind('proj', [uniAll, F.featBuf, mean, v, u]), Math.ceil(n / 64));
+    this.pc3 = await F.read(u, n * 4);
+    for (const b of [fs, mean, v, us, u, w, uni, uniAll]) b.destroy();
+    return this.pc3;
+  }
   // ---- entering: the 2D map, given depth, identical from above; a nudge shows the depth
   async enter() {
     const { device, engine, data, status } = this.ctx, nb = data.nBase, n = engine.n;
@@ -191,23 +277,29 @@ export class Cast3D {
     const t0 = performance.now();
     if (!this.fit) {   // a static map lends its exact 15-neighbour lists (an all-pairs search of 182,000 rows takes a minute)
       this.fit = new LiveFit(device, data.featS.subarray(0, nb * data.dim), nb, data.dim);
-      if (!(this.ctx.staticMap && this.fit.useLists(engine.knnIdx, engine.knnDist, K))) { status('3D: neighbour lists of the base map…'); await this.fit.neighbours(); }
+      if (!(this.ctx.staticMap && this.fit.useLists(engine.knnIdx, engine.knnDist, K))) await this.fit.neighbours();
     }
     this.liftSettings = { k: K, minDist: 0.03, spread: 1.2, lr: 1, anneal: true, epochs: LIFT_EPOCHS, gamma: 1, negRate: 5 };
     await this.fit.setK(K, LIFT_EPOCHS);
     const free = this.liftMode === 'free'; this.liftFree = free;
-    await this.runFit(this.flatStart, this.liftSettings, free ? { leash: this.leash } : { zOnly: true });
+    if (free && !this.leash) {   // the full fit: depth from the third principal axis, at the 2D map's spread, then Adam
+      const t1 = performance.now(), pc = await this.thirdAxis(); this.pcMs = performance.now() - t1;
+      const mv = (get) => { let m = 0, m2 = 0; for (let i = 0; i < nb; i++) { const x = get(i); m += x; m2 += x * x; } m /= nb; return [m, Math.sqrt(Math.max(1e-12, m2 / nb - m * m))]; };
+      const [, sx] = mv((i) => P[2 * i]), [, sy] = mv((i) => P[2 * i + 1]), [mz, sz] = mv((i) => pc[i]), k = (sx + sy) / 2 / sz, seed = y0.slice(0, nb * 3);
+      for (let i = 0; i < nb; i++) seed[3 * i + 2] = (pc[i] - mz) * k;
+      await this.runAdam(seed, this.liftSettings);
+    } else await this.runFit(this.flatStart, this.liftSettings, free ? { leash: this.leash } : { zOnly: true });
     this.copy(this.posW, this.posA, nb * 12); this.placeArrivals(20, free ? 'carry' : true);
     this.liftMs = performance.now() - t0; this.placedN = n; this.compN = engine.compactions;
     if (free) {   // the top view moves a little: glide from the flat map to the fit
       this.copy(this.flatStart, this.prev, n * 12); const g0 = performance.now(); this.glide = 0; this.loop();
       await new Promise((res) => { const tick = () => { const t = Math.min(1, (performance.now() - g0) / 900); this.glide = ease(t); if (t < 1) requestAnimationFrame(tick); else res(); }; requestAnimationFrame(tick); setTimeout(() => { this.glide = 1; res(); }, 3000); });
       this.glide = 1; this.copy(this.posA, this.prev, n * 12);
-      status(this.leash ? `3D (free fit, x and y leashed to the 2D map, ×${this.leash}): seen from above it is close to the 2D map · drag to turn, shift-drag to move, wheel to zoom` : `3D: a full 3D fit of all ${nb.toLocaleString()} rows, from the 2D map (${(this.liftMs / 1000).toFixed(1)} s) · drag to turn, shift-drag to move, wheel to zoom`);
+      // no note when 3D opens (the investigator, 2026-10-24): the view itself says it
       await this.nudge(); return;
     }
     this.copy(this.posA, this.prev, n * 12);
-    status('3D: seen from above it is the 2D map · drag to turn, shift-drag to move, wheel to zoom');
+    // no note when 3D opens (the investigator, 2026-10-24): the view itself says it
     this.loop(); await this.nudge();
   }
   async nudge() {   // tilt 20 degrees with a little turn, and back

@@ -1,0 +1,1 @@
+{"n":9025,"rowsId":"50e1a14f:9025","model":"clip","parts":["map_clip.f32"],"modelName":"openai/clip-vit-base-patch32","fitMs":4978,"steps":1500,"edges":224880,"fittedAt":"2026-10-25T18:01:01.986Z"}

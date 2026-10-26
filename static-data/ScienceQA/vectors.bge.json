@@ -1,0 +1,1 @@
+{"n": 12726, "dim": 384, "model": "BAAI/bge-small-en-v1.5", "rowsId": "7ceb5d44:12726", "parts": ["vectors_bge_0.f16", "vectors_bge_1.f16"], "sharedWithDefault": 0.753}
