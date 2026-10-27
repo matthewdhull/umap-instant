@@ -24,7 +24,7 @@ export const DATASETS = {
   // MiniLM vectors reduced to 64 principal components, and each paper's 30 nearest papers by the full vectors, so the browser
   // neither embeds nor searches; the files sit on a separate host (static-data/arxiv/info.json says where), never in Git
   arxiv: {
-    label: 'arXiv papers', what: 'arXiv papers (titles and abstracts)', noun: 'papers', one: 'paper', kind: 'lists', dim: 64, capRows: 3200000,
+    label: 'arXiv papers', what: 'arXiv papers (titles and abstracts)', noun: 'papers', one: 'paper', kind: 'lists', dim: 64, capRows: 3220000,   // capRows: room for every paper (3,215,335) plus the 4,096 the page adds; at 3,200,000 the feature buffer outgrew the device limit asked for
     time: 'year', date: (r) => Date.UTC(r[2], 0), categoryName: 'field',
   },
   asrs: {

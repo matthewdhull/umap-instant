@@ -1,1 +1,1 @@
-{"n": 3753, "dim": 384, "model": "BAAI/bge-small-en-v1.5", "rowsId": "c492581a:3753", "parts": ["vectors_bge_0.f16"], "sharedWithDefault": 0.4458}
+{"n": 3753, "dim": 384, "model": "BAAI/bge-small-en-v1.5", "rowsId": "c492581a:3753", "parts": ["vectors_bge_0.f16.bin"], "sharedWithDefault": 0.4458, "base": "https://huggingface.co/datasets/matthewdhull/umap-instant-arxiv/resolve/main/vectors/vispubdata/"}

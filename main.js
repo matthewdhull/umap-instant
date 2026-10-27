@@ -8,6 +8,7 @@ import { Cast3D } from './cast3d.js';
 import { DATASETS, MENU_ORDER, LOAD_S, modelsFor, defaultModel } from './datasets.js';
 import { findMap, keepMap, exportMap, keepOnScreen, onScreenMap } from './maps.js';
 import { putFile, readRows, inspect, formatOf, uploadDataset, savedSpec, SPEC_KEY } from './upload.js';
+import { loadMapFirst, nameRegions } from './mapfirst.js';
 import { PALETTE, computeRegions, computeRegionsSteps, docsSteps, runSliced, nameClusters, docsOf, setNsfwWords, setNsfwFilter, nsfwFilterOn , setNamingMinShare, setNamingSlots } from './regions.js';
 
 const $ = (id) => document.getElementById(id);
@@ -114,6 +115,13 @@ const noTime = () => SRC.static && !SRC.timeAxis;
 // timeline back offers to fit the map of the rows dated up to then (?until=, a date in ms); Play then places the rest
 // with Batched RevAdopt, and Full map returns to the whole table.
 const UNTIL = SRC.static ? +(params.get('until') || 0) : 0;
+// arXiv map first (mapfirst.js): the finished map, each paper's field and year and the region names come first (about 33 MB);
+// MAP_ONLY draws them with nothing else, and a control that needs vectors or neighbour lists reloads with ?full=1, which
+// reads everything and starts from the same map instead of fitting a new one. ?exportmap=1 (this machine) fits afresh and
+// writes the map and region names for arxiv/build_mapfirst.py.
+const EXPORT_MF = DATASETS[SOURCE]?.kind === 'lists' && params.get('exportmap') === '1' && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+const WANT_MF = DATASETS[SOURCE]?.kind === 'lists' && !UNTIL && !TUNED && !EXPORT_MF && params.get('base') !== 'handoff';
+let MF = null, MAP_ONLY = false;
 const loadedEnd = () => data.n > data.nBase ? data.tS[data.n - 1] : data.baseSeconds;
 
 function scoreOf(p) { const W = state.window, b = p * K; let c = 0; for (let k = 0; k < K; k++) if (engine.ranks[b + k] < W) c++; return c / K; }
@@ -494,9 +502,11 @@ let regionBuild = 0;
 async function buildRegions({ crossfade = true } = {}) {
   const token = ++regionBuild;
   if (!rstate.on || state.tuneMode) { /* no regions while the base map is being tuned: they come back, recomputed, with Done tuning */ regions = null; renderer.setRegions(null); rstate.focus = -1; renderer.focusRegion = -1; state.rates = null; renderer.setHeat(null); showRegion(); layoutChips(); $('r-regions').textContent = 'off'; return; }
-  if (!data.docs) { const docs = await runSliced(docsSteps(data.posts.slice(0, data.nBase))); if (!data.docs) data.docs = docs; }   // the base posts' words and word pairs, tokenised once
+  const shipped = shippedMap();   // arXiv's shipped map: the names it shipped with, no titles read (mapfirst.js)
+  if (!shipped && !data.docs) { const docs = await runSliced(docsSteps(data.posts.slice(0, data.nBase))); if (!data.docs) data.docs = docs; }   // the base posts' words and word pairs, tokenised once
   const basePos = engine.pos.slice(0, data.nBase * 2);
-  const next = await runSliced(computeRegionsSteps(basePos, data.nBase, { sigma: rstate.sigma, tintSigma: tintPx(), softSigma: rstate.soft, tint: rstate.tint, mergeTau: rstate.tau, posts: data.posts, docs: data.docs, feat: data.featS, dim: data.dim, labels: data.labels, labelS: data.labelS, labelColors: data.labelColors }));
+  const next = await runSliced(computeRegionsSteps(basePos, data.nBase, { sigma: rstate.sigma, tintSigma: tintPx(), softSigma: rstate.soft, tint: rstate.tint, mergeTau: rstate.tau, posts: shipped ? null : data.posts, docs: shipped ? null : data.docs, feat: shipped ? null : data.featS, dim: data.dim, labels: data.labels, labelS: data.labelS, labelColors: data.labelColors }));
+  if (shipped) { const m = nameRegions(next, MF.regions, rstate.sigma); logEvent('shipped region names', m); }
   if (token !== regionBuild || !rstate.on || state.tuneMode) return;   // superseded, or regions were switched off or tuning began meanwhile
   rstate.focus = -1; renderer.focusRegion = -1;
   prevRegions = regions; const oldS = regionS ? regionS.slice() : null; if (regionS && prevRegions) { regionPrevS = regionS.slice(); } else { regionPrevS = new Int16Array(data.N).fill(-1); }   // no regions on screen (off, or tuning): nothing to fade from; stale ids would index the new palette (black blots)
@@ -553,6 +563,7 @@ function arrivalRate() {
 const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // The grain sweep: regions of the base map at each width (no naming), scored by min(chips, CHIP_CAP) x coverage of base rows.
 function chooseGrain() {
+  if (shippedMap() && MF.regions.pick) { look.grainPick = { sigma: MF.regions.pick, table: MF.regions.grainTable || [], ms: 0, shipped: true }; return MF.regions.pick; }   // the sweep as it was run on the shipped map
   const t0 = performance.now(), table = [];
   for (const sigma of [2, 3, 4, 5, 6, 8, 10, 12]) { const R = computeRegions(engine.pos, data.nBase, { sigma, softSigma: 6, mergeTau: 0.1 }); const chips = R.regions.length, cov = R.regions.reduce((a, r) => a + r.countBase, 0) / Math.max(1, data.nBase); table.push({ sigma, chips, cov: +cov.toFixed(3), score: +(Math.min(chips, CHIP_CAP) * cov).toFixed(2) }); }
   let best = table[0]; for (const t of table) if (t.score > best.score) best = t;
@@ -626,7 +637,8 @@ function showRegion() {
     const rebuilds = e.log.filter(x => x.kind === 'rebuild').length; if (rebuilds) lines.push(`kept its identity through ${rebuilds} re-layout${rebuilds > 1 ? 's' : ''}`);
   }
   $('region-hist').innerHTML = lines.map(esc).join('<br>');
-  $('region-rep').innerHTML = r.rep >= 0 && data.posts[r.rep] ? esc(data.posts[r.rep].text) + '<small>the base post nearest the region’s mean vector</small>' : '';
+  const repText = r.repText ?? (r.rep >= 0 && data.posts[r.rep] ? data.posts[r.rep].text : '');
+  $('region-rep').innerHTML = repText ? esc(repText) + `<small>the ${SRC.static ? SRC.one : 'base post'} nearest the region’s mean vector</small>` : '';
 }
 // Chips keep their DOM elements between layouts (keyed by region) and update only what changed; layouts are
 // coalesced to one per animation frame so a flush or a toggle never rebuilds the layer in the middle of a frame.
@@ -844,8 +856,20 @@ function inspectAt(clientX, clientY) {
   const P = MOD.cmp && (clientX - r.left) / r.width > MOD.cmp.x ? MOD.xy.get(MOD.cmp.right) : engine.pos; let best = -1, bd = Infinity;   // right of the compare's divider: the other model's map
   for (let p = 0; p < engine.n; p++) { if (!engine.alive[p]) continue; const dx = P[2 * p] - wx, dy = P[2 * p + 1] - wy, d = dx * dx + dy * dy; if (d < bd) { bd = d; best = p; } }
   if (best < 0 || Math.sqrt(bd) * v.scale > 12 * dpr) { clearInspect(); return; }
+  if (MAP_ONLY) { inspectMapOnly(best); return; }
   const nb = Array.from(engine.knnIdx.subarray(best * K, best * K + K)), ad = engine.adoptersOf(best);
   state.inspect = { p: best, neighbours: nb, adopters: ad }; showInspect(); render();
+}
+// the map-only load: the paper's title and its 15 nearest (the first half of its shipped 30-list) by byte range, then the
+// titles of the first five; adopters need every list and come with the full load
+async function inspectMapOnly(p) {
+  const I = state.inspect = { p, neighbours: [], adopters: [], loading: true }; showInspect(); render();
+  try {
+    const [, list] = await Promise.all([MF.titles.load(p), MF.lists.of(p)]); if (state.inspect !== I) return;
+    I.neighbours = Array.from(list.subarray(0, K)).filter((j) => j >= 0); showInspect(); render();
+    await Promise.all(I.neighbours.slice(0, 5).map((j) => MF.titles.load(j))); if (state.inspect !== I) return;
+  } catch (e) { console.warn('[mapfirst] inspect', e); I.failed = true; }
+  I.loading = false; if (state.inspect === I) { showInspect(); render(); }
 }
 function clearInspect() { state.inspect = null; renderer.hlCount = 0; $('inspect').hidden = true; render(); }
 const esc = (s) => s.replace(/[&<>]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
@@ -860,7 +884,8 @@ function showInspect() {
   const reg = regions && regionS[p] >= 0 ? regions.regions[regionS[p]] : null;
   $('inspect-post').innerHTML = (post.img ? `<img class="thumb" src="${post.img}" alt="">` : '') + esc(post.text) + `<small><i class="sw" style="background:${data.labelColors[lab] || '#666'}"></i>${esc(dispName(lab))}${reg ? ` · region: ${esc(dispName(reg.name))}` : (regions ? ' · outside every region' : '')}${post.tags.length ? ' · #' + post.tags.map(esc).join(' #') : ''}${post.score != null ? ` · score ${post.score}${post.descendants != null ? `, ${post.descendants} comments` : ''}` : ''}${post.kind ? ` · ${esc(String(post.kind))}` : ''}</small>`;
   const under = MODELS && (MOD.shown !== MODEL || MOD.cmp) ? ` under ${mshort(MODEL)}, the model this page loaded` : '';
-  $('inspect-body').innerHTML = `<div><i class="sw" style="background:#59e6c7"></i>${K} nearest by meaning${under} (its current list)</div><div><i class="sw" style="background:#fa80c8"></i>${I.adopters.length} ${SRC.noun} list it among their own ${K} nearest (adopters)</div><div><i class="sw" style="background:#ffd959"></i>${mutual} are both</div><small>lists are as of ${mmss(state.clock)}; neighbours placed later than this post can appear</small>`;
+  if (MAP_ONLY) $('inspect-body').innerHTML = I.failed ? '<small>its title and neighbours could not be read</small>' : I.loading && !I.neighbours.length ? '<small>reading its title and nearest papers…</small>' : `<div><i class="sw" style="background:#59e6c7"></i>${I.neighbours.length} nearest by meaning (all 384 numbers of its MiniLM vector)</div><small>adopters (papers that list it among their own nearest) need every paper's list: they come with the tuner, 3D or keep settling, which read them all</small>`;
+  else $('inspect-body').innerHTML = `<div><i class="sw" style="background:#59e6c7"></i>${K} nearest by meaning${under} (its current list)</div><div><i class="sw" style="background:#fa80c8"></i>${I.adopters.length} ${SRC.noun} list it among their own ${K} nearest (adopters)</div><div><i class="sw" style="background:#ffd959"></i>${mutual} are both</div><small>lists are as of ${mmss(state.clock)}; neighbours placed later than this post can appear</small>`;
   $('inspect-nbrs').innerHTML = I.neighbours.slice(0, 5).map((j, k) => { const q = data.posts[j]; const t = q.text.length > 220 ? q.text.slice(0, 217) + '…' : q.text; return `<div class="nbr"><b>${k + 1}.</b> ${esc(t)}</div>`; }).join('');
 }
 
@@ -1034,7 +1059,21 @@ async function reloadWith(k, why) {
   location.href = urlWithModel(k).toString();
 }
 // true when the shown model is not the loaded one, after starting the reload that fixes it
-function needsLoaded(why) { if (!MODELS || MOD.shown === MODEL) return false; reloadWith(MOD.shown, why); return true; }
+function needsLoaded(why) { if (MAP_ONLY) { reloadFull(why); return true; } if (!MODELS || MOD.shown === MODEL) return false; reloadWith(MOD.shown, why); return true; }
+// the map-only load (arXiv) has no vectors or neighbour lists: reload reading everything; the map and the view stay as they are
+const FULL_VIEW_KEY = 'jet.fullView';
+function reloadFull(why) {
+  try { const v = renderer.view; sessionStorage.setItem(FULL_VIEW_KEY, JSON.stringify({ source: SOURCE, cx: v.cx, cy: v.cy, scale: v.scale, then: why })); } catch { /* the full load opens at the whole map */ }
+  status(`${why} needs every paper's vectors and neighbour lists (about 1.3 GB, read once): reloading with them (the map stays as it is)…`);
+  const u = new URL(location.href); u.searchParams.set('full', '1'); location.href = u.toString();
+}
+// the control that asked for the full load, opened once it is in (no second click)
+function reopen(why) {
+  if (why === 'The base map tuner') $('tunerLink')?.click(); else if (why === 'The 3D view') $('view3d')?.click();
+  else if (why === 'Keep settling') { const k = $('keepSettling'); if (k && !k.checked) { k.checked = true; k.dispatchEvent(new Event('change')); } }
+  else if (why === 'Colouring by how well placed') { $('mode').value = '3'; $('mode').dispatchEvent(new Event('change')); }
+}
+function takeFullView() { try { const v = JSON.parse(sessionStorage.getItem(FULL_VIEW_KEY) || 'null'); sessionStorage.removeItem(FULL_VIEW_KEY); return v && v.source === SOURCE ? v : null; } catch { return null; } }
 // the map the page asked to keep across a reload (reloadWith), if it is this load's: read once
 async function keptMap(n) {
   let k = null; try { k = JSON.parse(sessionStorage.getItem(KEEP_KEY) || 'null'); sessionStorage.removeItem(KEEP_KEY); } catch { /* none */ }
@@ -1227,6 +1266,8 @@ function staticDone() {
   const fitS = (data.fit.ms / 1000).toFixed(1);
   if (UNTIL) status(`Map of the ${data.nBase.toLocaleString()} ${SRC.noun} up to ${tLabelDate(UNTIL)}, fitted in ${fitS} s · Play places the other ${(data.n - data.nBase).toLocaleString()} (Batched RevAdopt) · Full map returns to all ${data.n.toLocaleString()}`);
   else if (data.fit.kept) status(`${data.n.toLocaleString()} ${SRC.noun}: the ${MODELS[MODEL].label} map that was on screen, now with its own vectors`);
+  else if (data.fit.mapOnly) status(`${data.n.toLocaleString()} ${SRC.noun}: the finished map (${(MF.bytes / 1e6).toFixed(0)} MB, page open ${(performance.now() / 1000).toFixed(1)} s) · click a paper for its title and nearest papers · the tuner, 3D and keep settling read every vector and list first (about 1.3 GB)`);
+  else if (data.fit.shipped) status(`${data.n.toLocaleString()} ${SRC.noun}, the finished map with every vector and neighbour list`);
   else status(`${data.n.toLocaleString()} ${SRC.noun}, one map fitted on this GPU in ${fitS} s${SRC.timeAxis ? ' · drag back along the timeline to fit the map at an earlier date and play forward from there' : ''}`);
 }
 // the date a rewind would fit up to: the end of the time unit under T (the whole month or year)
@@ -1410,6 +1451,51 @@ function previewAdd(col, v, n) {
   else { const y = pcaProject(v, n, dim, col.axes, 3.0); col.previewXY.set(y, col.previewN * 2); col.previewN += n; }
   drawPreview(col); previewRefit(col);
 }
+// ---- arXiv map only (mapfirst.js): the col and data objects freshCollect and freshBuild would give, from the finished map,
+// each paper's field and year and nothing else. The engine gets the map itself as two-number features (never searched) and
+// empty neighbour lists: nothing is placed, scored or tuned in this mode (those controls reload with ?full=1). Stream times
+// as static_worker.js gives dated rows: each year's papers spread evenly over that year.
+function mapOnlyBuild() {
+  const { info, n, xy, cat, year } = MF, minutes = FRESH, nowUs = Date.now() * 1000, cursorUs = nowUs - minutes * 60e6, span = nowUs - cursorUs;
+  const y0 = info.years[0], d0 = Date.UTC(y0 + year[0], 0), d1 = Date.UTC(y0 + year[n - 1] + 1, 0), toT = (ms) => (ms - d0) / (d1 - d0) * span;
+  const N = n + 4096, tS = new Float32Array(N).fill(Infinity);
+  for (let i = 0; i < n;) { let j = i; while (j < n && year[j] === year[i]) j++; const a = toT(Date.UTC(y0 + year[i], 0)), b = toT(j < n ? Date.UTC(y0 + year[j], 0) : Date.UTC(y0 + year[i] + 1, 0)); for (let k = i; k < j; k++) tS[k] = (a + (k - i + 0.5) / (j - i) * (b - a)) / 1e6; i = j; }
+  Object.assign(SRC, { rowsId: MF.rowsId, rowsLoaded: n, rowsTotal: n, model: info.model, timeAxis: { d0, d1, unit: 'year' }, timeSpan: minutes * 60, colors: null, categoryName: DATASETS[SOURCE].categoryName || null, agreement: null });
+  // the archive (cs, math, hep-th, ...) colours the map, as the full load does: the 24 commonest and "other"
+  const field = info.categories.map((c) => String(c).split('.')[0]), counts = new Map(); for (let i = 0; i < n; i++) { const f = field[cat[i]]; counts.set(f, (counts.get(f) || 0) + 1); }
+  const ranked = [...counts].sort((a, b) => b[1] - a[1]).map(([c]) => c), keep = ranked.slice(0, 24), rest = ranked.length - keep.length, names = keep.slice(); if (rest) names.push(`(other ${rest})`);
+  const colors = {}; names.forEach((nm, i) => { colors[nm] = i < keep.length ? PALETTE[i % PALETTE.length] : '#8c99ad'; });
+  const catIndex = new Map(keep.map((c, i) => [c, i])), catOther = rest ? keep.length : 0, ofCat = field.map((f) => catIndex.get(f) ?? catOther);
+  const labelS = new Uint16Array(N).fill(65535); for (let i = 0; i < n; i++) labelS[i] = ofCat[cat[i]];
+  // a paper as the page reads it: field and year at once, its title (and link) once the block holding it has been read
+  const postAt = (p) => { const t = MF.titles.get(p); return { text: t ? t.title : '…', kind: `${info.categories[cat[p]]} · ${y0 + year[p]}`, url: t ? `https://arxiv.org/abs/${t.id}` : undefined, cat: field[cat[p]], tags: [], reply: 0 }; };
+  const posts = new Proxy([], { get(tg, k) { if (typeof k === 'string' && k.charCodeAt(0) >= 48 && k.charCodeAt(0) <= 57) { const p = +k; return p < n ? postAt(p) : undefined; } return k === 'length' ? n : Reflect.get(tg, k); } });
+  const featS = new Float32Array(N * 2); featS.set(xy);
+  const A = 1.3667583810909143, B = 0.8160247038816811, fit = { xy, ms: 0, steps: 0, edges: 0, mapOnly: true };
+  const baseMeta = { n_base: n, base_seconds: minutes * 60, originals_only: true, dropped_base_window_replies: 0, k: 15, a: A, b: B, dim: 2, model: info.model, pooling: 'mean', encoder: info.model, fit: 'precomputed', fit_steps: 0, fit_ms: 0, edges: 0, labels: names, label_colors: colors, label_terms: names.map(() => []) };
+  const col = { minutes, cursorUs, liveStartUs: nowUs, baseEndUs: nowUs + 1, later: [], refits: 0, db: null, worker: null, axes: null, catIndex, catOther };
+  const data = { N, n, nCapture: n, dim: 2, nBase: n, encoder: info.model, model: info.model, k: 15, a: A, b: B, baseName: 'fresh', baseMeta, rowsMeta: { n, duration_seconds: minutes * 60, t0_us: cursorUs, encoder: info.model, bases: ['fresh'], fetched_at: new Date(nowUs / 1000).toISOString() }, t0us: cursorUs,
+    labels: names, labelColors: colors, labelTerms: names.map(() => []), baseSeconds: minutes * 60, tS, wallS: tS.slice(), labelS, replyS: new Uint8Array(N), posts, featS,
+    baseXY: xy, bIdx: new Int32Array(n * 15).fill(-1), bDist: new Float32Array(n * 15).fill(Infinity), bRho: new Float32Array(n), bSigma: new Float32Array(n), fit };
+  return { col, data };
+}
+// the shipped region names apply while the base map is the shipped one (map only, or a full load not yet tuned)
+function shippedMap() { if (!MF || !engine || data.nBase !== MF.n) return false; const P = engine.pos, X = MF.xy, step = Math.max(1, Math.floor(MF.n / 997)); for (let i = 0; i < MF.n; i += step) if (P[2 * i] !== X[2 * i] || P[2 * i + 1] !== X[2 * i + 1]) return false; return true; }
+// ?exportmap=1 (arXiv, this machine): the map just fitted and its regions named from every title at each grain the page
+// offers, to serve.py's /save for arxiv/build_mapfirst.py
+async function exportMapFirst() {
+  const n = data.nBase, xy = engine.pos.slice(0, n * 2), bySigma = {}, t0 = performance.now();
+  if (!data.docs) data.docs = await runSliced(docsSteps(data.posts.slice(0, n)));
+  for (const sigma of [2, 3, 4, 5, 6, 8, 10, 12]) {
+    status(`Exporting the map: naming the regions at grain ${sigma}…`);
+    const R = await runSliced(computeRegionsSteps(xy, n, { sigma, softSigma: rstate.soft, mergeTau: 0.1, posts: data.posts, docs: data.docs, feat: data.featS, dim: data.dim }));
+    bySigma[sigma] = R.regions.map((r) => ({ k: r.k, cx: r.cx, cy: r.cy, countBase: r.countBase, name: r.name, terms: r.terms, termInfo: r.termInfo, rep: r.rep, repText: r.rep >= 0 ? data.posts[r.rep].text : '' }));
+  }
+  const meta = { n, rowsId: SRC.rowsId || null, tau: 0.1, pick: look.grainPick?.sigma ?? rstate.sigma, grainTable: look.grainPick?.table || null, fitMs: Math.round(data.fit.ms), steps: data.fit.steps, edges: data.fit.edges, fittedAt: new Date().toISOString(), model: data.model };
+  await fetch(`/save?path=${SOURCE}/map.f32`, { method: 'POST', body: xy.buffer });
+  await fetch(`/save?path=${SOURCE}/regions.json`, { method: 'POST', body: JSON.stringify({ ...meta, bySigma }) });
+  status(`Exported ${SOURCE}'s map (${n.toLocaleString()} rows) and region names at 8 grains in ${((performance.now() - t0) / 1000).toFixed(0)} s: run arxiv/build_mapfirst.py`);
+}
 // Build the data object loadData would have produced, from the collected base window: originals only, exact lists and
 // a UMAP layout fitted on this GPU, k-means topic clusters named by their distinctive words.
 async function freshBuild(device, col, cap) {
@@ -1434,6 +1520,9 @@ async function freshBuild(device, col, cap) {
     const lists = await StreamingEngine.fitBase(device, feat, nBase, dim, { a: A, b: B, steps: 0, init: new Float32Array(nBase * 2), onProgress: (m) => status(`Fitting the base map (${m})…`) });
     const t = await tunedLayout(device, feat, nBase, dim, TUNED, (m) => status(`Fitting the tuned base map (${m})…`));
     fit = { ...lists, xy: t.xy, steps: TUNED.epochs, edges: t.edges, ms: lists.ms + t.ms, tuned: tunedToParam(TUNED) };
+  } else if (MF && nBase === MF.n && col.lists && nBase === col.lists.n) {   // arXiv's shipped map (mapfirst.js): its graph is built from the shipped lists, nothing is fitted
+    const lists = await StreamingEngine.fitBase(device, feat, nBase, dim, { a: A, b: B, steps: 0, init: MF.xy, lists: col.lists, onProgress: (m) => status(`The finished map of ${nBase.toLocaleString()} ${SRC.noun} (${m.replace('base fit: ', '')})…`) });
+    fit = { ...lists, xy: MF.xy, steps: 0, shipped: true };
   } else fit = await StreamingEngine.fitBase(device, feat, nBase, dim, { a: A, b: B, steps: 1500, lr: init ? 0.05 : 0.1, negScale: 6, init, lists: col.lists && nBase === col.lists.n && orig.every((i, r) => i === r) ? col.lists : null, onProgress: (m) => status(SRC.static ? `Fitting the map of ${nBase.toLocaleString()} ${SRC.noun} (${m.replace('base fit: ', '')})…` : `Fitting the base map (${m})…`) });
   if (col.lists && nBase === col.lists.n) state.shippedLists = col.lists;   // the tuner and keep settling use them too
   if (whole && !kept) {
@@ -1713,9 +1802,11 @@ async function main() {
       if (!HANDOFF || HANDOFF.source !== SOURCE || (RECORDED && HANDOFF.recKey !== REC_KEY) || (SRC.dim && HANDOFF.dim !== SRC.dim)) { console.warn('[jet] no handed-over base for this source; fitting as usual'); HANDOFF = null; const u = new URL(location.href); u.searchParams.delete('base'); history.replaceState(null, '', u); }
       if (HANDOFF) $('h1sub').textContent += ' · tuned base';
     }
-    if (FRESH) { col = HANDOFF?.later ? await handoffCollect(device) : await freshCollect(FRESH, device); loadStep(1); data = await freshBuild(device, col, SRC.static ? Math.max(0, (SRC.rowsLoaded || 0) - col.basePosts.length) + 4096 : CAP); if (col.catIndex) { data.catIndex = col.catIndex; data.catOther = col.catOther; } state.cacheDb = col.db; } state.countFrom = data.baseSeconds;
+    if (WANT_MF) { MF = await loadMapFirst(SOURCE, status).catch((e) => { console.warn('[mapfirst] not loaded; reading everything', e); return null; }); MAP_ONLY = !!MF && params.get('full') !== '1'; if (MF) logEvent('map first', { mapOnly: MAP_ONLY, mb: +(MF.bytes / 1e6).toFixed(1), ms: Math.round(performance.now()) }); }
+    if (MAP_ONLY) { ({ col, data } = mapOnlyBuild()); loadStep(1); data.catIndex = col.catIndex; data.catOther = col.catOther; }
+    else if (FRESH) { col = HANDOFF?.later ? await handoffCollect(device) : await freshCollect(FRESH, device); loadStep(1); data = await freshBuild(device, col, SRC.static ? Math.max(0, (SRC.rowsLoaded || 0) - col.basePosts.length) + 4096 : CAP); if (col.catIndex) { data.catIndex = col.catIndex; data.catOther = col.catOther; } state.cacheDb = col.db; } state.countFrom = data.baseSeconds;
     const info = adapter.info || {}; $('r-gpu').textContent = [info.vendor, info.architecture, info.description].filter(Boolean).join(' · ') || 'adapter details hidden by the browser';
-    engine = new StreamingEngine(device, data, { lazyLedger: !!SRC.static }); await engine.checkShaders();
+    engine = new StreamingEngine(device, data, { lazyLedger: !!SRC.static, noLedger: MAP_ONLY }); await engine.checkShaders();
     renderer = new PointRenderer(device, $('map'), engine, data); renderer.onRedraw = () => render(); scores = new Float32Array(data.N);   // onRedraw: a draw skipped by the queue guard is made up once the GPU catches up
     engine.onLabels = (s, w) => renderer.updateLabels(s, w);
     status('Scoring the starting map…'); await engine.baseRanksReady; recomputeScores(0); updateBaseP5(); applyThreshold();
@@ -1730,6 +1821,8 @@ async function main() {
       state.liveShift = 0; state.captureEnd = (col.liveStartUs - col.cursorUs) / 1e6; state.windowEndUs = col.liveStartUs; if (col.worker) attachWorker(col.worker); if (col.startMsg) col.worker.postMessage(col.startMsg);
       for (const m of col.later) ingestFrame(m.hdr, m.vecs, () => {}); col.later = [];
       if (SRC.static) { staticUi(); await staticInterval(); }
+      // back from the map-only load (arXiv): the view it had (the glide below ends there), then the control that asked for it
+      const fv = MF && !MAP_ONLY ? takeFullView() : null; if (fv) { Object.assign(renderer.view, { cx: fv.cx, cy: fv.cy, scale: fv.scale }); if (fv.then) setTimeout(() => reopen(fv.then), col.axes ? 3200 : 300); }
       // hand-off from the preview: the renderer takes the preview's mapping, rows start where the preview showed them
       if (col.axes) {
         const pm = previewMapping(), target = { ...renderer.view };   // the view fitTo gave the fitted map; the glide eases from the preview's view to it
@@ -1745,6 +1838,7 @@ async function main() {
           loadDone(); state.chipsHold = false; render(); ch.style.transition = 'opacity .45s ease'; requestAnimationFrame(() => { ch.style.opacity = ''; }); setTimeout(() => { ch.style.transition = ''; }, 600); if (SRC.static) { staticDone(); preloadMaps(); } if (UNTIL) engine.ledgerReady; });   // a rewound map: Play's placement needs the ledger; started once the glide is over
       } else { $('map').style.visibility = $('chips').style.visibility = ''; $('preview').hidden = true; loadDone(); if (SRC.static) { staticDone(); preloadMaps(); } }
       if (HANDOFF?.view) { Object.assign(renderer.view, viewFrom(HANDOFF.view, renderer.canvas.getBoundingClientRect())); render(); }   // the tuner's view, unchanged
+      if (EXPORT_MF) exportMapFirst();
       dropSnapshot();   // this page's own map is drawn: the previous page's picture fades out
       if (!SRC.static) status(HANDOFF ? `Base map from the tuner · ${(data.n - data.nBase).toLocaleString()} arriving` : `Base map fitted · ${(data.n - data.nBase).toLocaleString()} arriving`);
     } else {

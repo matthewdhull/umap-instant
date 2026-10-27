@@ -1,1 +1,1 @@
-{"n": 9025, "dim": 512, "model": "openai/clip-vit-base-patch32", "rowsId": "50e1a14f:9025", "parts": ["vectors_clip_0.f16", "vectors_clip_1.f16"], "sharedWithDefault": 0.1879}
+{"n": 9025, "dim": 512, "model": "openai/clip-vit-base-patch32", "rowsId": "50e1a14f:9025", "parts": ["vectors_clip_0.f16.bin", "vectors_clip_1.f16.bin"], "sharedWithDefault": 0.1879, "base": "https://huggingface.co/datasets/matthewdhull/umap-instant-arxiv/resolve/main/vectors/imagewoof/"}

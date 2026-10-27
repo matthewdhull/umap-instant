@@ -13569,19 +13569,20 @@
   "Other Scheduling changes": "#3b65ba"
  },
  "rowParts": [
-  "rows_0.json",
-  "rows_1.json",
-  "rows_2.json",
-  "rows_3.json",
-  "rows_4.json",
-  "rows_5.json",
-  "rows_6.json"
+  "rows_0.json.bin",
+  "rows_1.json.bin",
+  "rows_2.json.bin",
+  "rows_3.json.bin",
+  "rows_4.json.bin",
+  "rows_5.json.bin",
+  "rows_6.json.bin"
  ],
  "vectorParts": [
-  "vectors_0.f32",
-  "vectors_1.f32",
-  "vectors_2.f32",
-  "vectors_3.f32",
-  "vectors_4.f32"
- ]
+  "vectors_0.f32.bin",
+  "vectors_1.f32.bin",
+  "vectors_2.f32.bin",
+  "vectors_3.f32.bin",
+  "vectors_4.f32.bin"
+ ],
+ "base": "https://huggingface.co/datasets/matthewdhull/umap-instant-arxiv/resolve/main/vectors/asrs/"
 }

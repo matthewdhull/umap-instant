@@ -42,7 +42,7 @@ const vecTag = (kind) => (modelKey(kind) && modelKey(kind) !== defaultModel(kind
 const vecFile = (kind) => (vecTag(kind) ? `vectors.${vecTag(kind)}.json` : 'vectors.json');
 async function precomputed(key, rowsId, kind = 'text') {
   const f = await findStatic(key, vecFile(kind)); if (!f || f.json.rowsId !== rowsId || f.json.model !== (kind === 'text' ? TM : IM).name) return null;
-  note(`Reading ${DATASETS[key].label}: precomputed vectors…`); const v = fromHalves(new Uint16Array(await fetchParts(f.base, f.json.parts)));
+  note(`Reading ${DATASETS[key].label}: precomputed vectors…`); const v = fromHalves(new Uint16Array(await fetchParts(f.json.base || f.base, f.json.parts)));   // base: the parts' own host (Hugging Face on the site)
   return { vecs: v, dim: f.json.dim, model: f.json.model, hf: f.json.model, device: 'precomputed', loadMs: 0 };
 }
 // ?export=1 on this machine's page: the vectors just embedded go to serve.py's /save, in parts under 10 MB, for the site
@@ -269,16 +269,37 @@ async function load(key, cap) {
   if (D.kind === 'lists') {   // arXiv (arxiv/build_arxiv.py): rows, 64-number vectors and 30-neighbour lists, all in parts
     const f = await findStatic(key, 'info.json'); if (!f) throw new Error(`${label} is not available here (no static-data/${key}/info.json)`);
     const info = f.json, base = info.base || f.base, n = info.n; note(`Reading ${label}: ${n.toLocaleString()} papers…`);
-    let got = 0; const part = (p) => fetchBuf(base + p).then((b) => { got += b.byteLength; note(`Reading ${label}: ${mb(got)}`); return b; });
+    // every file counts, the titles (rows_*.json, a quarter of the bytes) too: the count once stopped at 944 MB, all the binary
+    // parts, while the titles were still arriving, which read as a stall. MB here are millions of bytes, as the files are listed.
+    // Bytes count as they arrive. A file with no new bytes for 20 s is cancelled and fetched again past the browser's cache
+    // (up to 3 tries; then the load fails with its name): in the investigator's Chrome the 39 title files once never arrived
+    // (more than 5 min at "991 of 1318 MB, 120 of 159 files") while the same files took 4 s in a clean worker here.
+    const files = info.rowParts.length + info.vectorParts.length + info.knnIdxParts.length + info.knnDistParts.length, total = info.bytes || 0; let got = 0, done = 0, retried = 0;
+    const show = () => note(`Reading ${label}: ${(got / 1e6).toFixed(0)}${total ? ` of ${(total / 1e6).toFixed(0)}` : ''} MB, ${done} of ${files} files${retried ? ` (${retried} fetched again after stalling)` : ''}`);
+    const steady = async (url, cache, tries = 3) => {
+      const ac = new AbortController(); let last = Date.now(), mine = 0; const dog = setInterval(() => { if (Date.now() - last > 20000) ac.abort(); }, 2000);
+      try {
+        const r = await fetch(url, { cache, signal: ac.signal }); if (!r.ok) throw new Error(`${url.split('/').pop()}: ${r.status}`);
+        const rd = r.body.getReader(), chunks = [];
+        for (;;) { const { done: end, value } = await rd.read(); if (end) break; chunks.push(value); mine += value.byteLength; got += value.byteLength; last = Date.now(); show(); }
+        const out = new Uint8Array(mine); let o = 0; for (const c of chunks) { out.set(c, o); o += c.byteLength; } return out.buffer;
+      } catch (e) {
+        got -= mine; if (!ac.signal.aborted || tries <= 1) throw ac.signal.aborted ? new Error(`${url.split('/').pop()} stalled three times`) : e;
+        retried++; log(`${url.split('/').pop()}: no bytes for 20 s, fetching again`); return steady(url, 'no-store', tries - 1);
+      } finally { clearInterval(dog); }
+    };
+    const part = (p) => steady(base + p, 'default').then((b) => { done++; show(); return b; });
     const cat = async (parts) => { const bufs = await Promise.all(parts.map(part)), out = new Uint8Array(bufs.reduce((a, b) => a + b.byteLength, 0)); let o = 0; for (const b of bufs) { out.set(new Uint8Array(b), o); o += b.byteLength; } return out.buffer; };
-    const [rowsArr, vbuf, ibuf, dbuf] = await Promise.all([Promise.all(info.rowParts.map((p) => fetch(base + p).then((r) => r.json()))).then((a) => a.flat()), cat(info.vectorParts), cat(info.knnIdxParts), cat(info.knnDistParts)]);
+    const dec = new TextDecoder(), rowsOf = (p) => part(p).then((b) => JSON.parse(dec.decode(b)));
+    const [rowsArr, vbuf, ibuf, dbuf] = await Promise.all([Promise.all(info.rowParts.map(rowsOf)).then((a) => a.flat()), cat(info.vectorParts), cat(info.knnIdxParts), cat(info.knnDistParts)]);
+    note(`Reading ${label}: all ${files} files in (${(got / 1e6).toFixed(0)} MB); setting out ${n.toLocaleString()} papers…`);
     const field = (c) => String(info.categories[c] || '').split('.')[0];   // the archive (cs, math, hep-th, ...) colours the map
     return { posts: rowsArr.map((r) => ({ text: r[0], kind: `${info.categories[r[1]]} · ${r[2]}`, url: `https://arxiv.org/abs/${r[3]}`, cat: field(r[1]) })), dates: rowsArr.map(D.date),
       vecs: fromHalves(new Uint16Array(vbuf)), dim: info.dim, lists: { idx: new Int32Array(ibuf), dist: fromHalves(new Uint16Array(dbuf)), k: info.k, n }, model: info.model || 'sentence-transformers/all-MiniLM-L6-v2 (64 principal components)', hf: 'precomputed', device: 'precomputed', loadMs: 0, total: n };
   }
   if (D.kind === 'vectors') {   // packed locally (ASRS): info.json, rows.json, vectors as float32
     const f = await findStatic(key, 'info.json'); if (!f) throw new Error(`${label} is not packed here: run python3 browser_jetstream/pack_asrs.py`);
-    const base = f.base, info = f.json; note(`Reading ${label}…`);
+    const info = f.json, base = info.base || f.base; note(`Reading ${label}…`);   // base: the parts' own host (Hugging Face on the site)
     const [rows, vbuf] = await Promise.all([info.rowParts ? Promise.all(info.rowParts.map((p) => fetch(base + p).then((r) => r.json()))).then((a) => a.flat()) : fetch(base + 'rows.json').then((r) => r.json()), info.vectorParts ? fetchParts(base, info.vectorParts) : fetchBuf(base + info.vectors)]);
     const all = new Float32Array(vbuf), dim = info.dim, take = pick(rows.length, cap, rows.map(D.date)), vecs = new Float32Array(take.length * dim);
     take.forEach((i, r) => vecs.set(all.subarray(i * dim, (i + 1) * dim), r * dim));
